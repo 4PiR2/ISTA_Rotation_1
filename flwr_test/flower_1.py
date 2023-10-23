@@ -7,12 +7,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as transforms
+from flwr.server import SimpleClientManager
 from flwr.server.client_proxy import ClientProxy
 from torch.utils.data import DataLoader, random_split
 from torchvision.datasets import CIFAR10
 
 import flwr as fl
 from flwr.common import Metrics, FitRes, Parameters, Scalar
+
+from my_server import MyServer
 
 DEVICE = torch.device('cuda:0' if torch.cuda.is_available() else "cpu")  # Try "cuda" to train on GPU
 
@@ -65,19 +68,19 @@ trainloaders, valloaders, testloader = load_datasets()
 
 
 class Net(nn.Module):
-    def __init__(self) -> None:
+    def __init__(self, in_channels=3, n_kernels=16, out_dim=10):
         super(Net, self).__init__()
-        self.conv1 = nn.Conv2d(3, 6, 5)
+        self.conv1 = nn.Conv2d(in_channels, n_kernels, 5)
         self.pool = nn.MaxPool2d(2, 2)
-        self.conv2 = nn.Conv2d(6, 16, 5)
-        self.fc1 = nn.Linear(16 * 5 * 5, 120)
+        self.conv2 = nn.Conv2d(n_kernels, 2 * n_kernels, 5)
+        self.fc1 = nn.Linear(2 * n_kernels * 5 * 5, 120)
         self.fc2 = nn.Linear(120, 84)
-        self.fc3 = nn.Linear(84, 10)
+        self.fc3 = nn.Linear(84, out_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.pool(F.relu(self.conv1(x)))
         x = self.pool(F.relu(self.conv2(x)))
-        x = x.view(-1, 16 * 5 * 5)
+        x = x.view(x.shape[0], -1)
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
         x = self.fc3(x)
@@ -87,7 +90,7 @@ class Net(nn.Module):
 def train(net, trainloader, epochs: int, verbose=False):
     """Train the network on the training set."""
     criterion = torch.nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(net.parameters())
+    optimizer = torch.optim.SGD(net.parameters(), lr=2e-3, momentum=.9, weight_decay=5e-5)
     net.train()
     for epoch in range(epochs):
         correct, total, epoch_loss = 0, 0, 0.0
@@ -160,7 +163,13 @@ def client_fn(cid: str) -> FlowerClient:
     """Create a Flower client representing a single organization."""
 
     # Load model
+    server_round_init: int = 10
     net = Net().to(DEVICE)
+    if server_round_init:
+        net.load_state_dict(
+            torch.load(os.path.join('output', f"model_round_{server_round_init}.pth")),
+            strict=True
+        )
 
     # Load data (CIFAR-10)
     # Note: each client gets a different trainloader/valloader, so each client
@@ -196,8 +205,17 @@ def weighted_average(metrics: List[Tuple[int, Metrics]]) -> Metrics:
     return {"accuracy": sum(accuracies) / sum(examples)}
 
 
-net = Net().to(DEVICE)
 class SaveModelStrategy(fl.server.strategy.FedAvg):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.server_round_init: int = 10
+        self.net = Net().to(DEVICE)
+        if self.server_round_init:
+            self.net.load_state_dict(
+                torch.load(os.path.join('output', f"model_round_{self.server_round_init}.pth")),
+                strict=True
+            )
+
     def aggregate_fit(
         self,
         server_round: int,
@@ -206,6 +224,7 @@ class SaveModelStrategy(fl.server.strategy.FedAvg):
     ) -> Tuple[Optional[Parameters], Dict[str, Scalar]]:
         """Aggregate model weights using weighted average and store checkpoint"""
 
+        server_round += self.server_round_init
         # Call aggregate_fit from base class (FedAvg) to aggregate parameters and metrics
         aggregated_parameters, aggregated_metrics = super().aggregate_fit(server_round, results, failures)
 
@@ -216,12 +235,12 @@ class SaveModelStrategy(fl.server.strategy.FedAvg):
             aggregated_ndarrays: List[np.ndarray] = fl.common.parameters_to_ndarrays(aggregated_parameters)
 
             # Convert `List[np.ndarray]` to PyTorch`state_dict`
-            params_dict = zip(net.state_dict().keys(), aggregated_ndarrays)
+            params_dict = zip(self.net.state_dict().keys(), aggregated_ndarrays)
             state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
-            net.load_state_dict(state_dict, strict=True)
+            self.net.load_state_dict(state_dict, strict=True)
 
             # Save the model
-            torch.save(net.state_dict(), os.path.join('output', f"model_round_{server_round}.pth"))
+            torch.save(self.net.state_dict(), os.path.join('output', f"model_round_{server_round}.pth"))
 
         return aggregated_parameters, aggregated_metrics
 
@@ -240,8 +259,9 @@ strategy = SaveModelStrategy(
 fl.simulation.start_simulation(
     client_fn=client_fn,
     num_clients=NUM_CLIENTS,
-    config=fl.server.ServerConfig(num_rounds=20),
-    strategy=strategy,
+    server=MyServer(client_manager=SimpleClientManager(), strategy=strategy),
+    config=fl.server.ServerConfig(num_rounds=10),
+    # strategy=strategy,
     client_resources=client_resources,
 )
 
