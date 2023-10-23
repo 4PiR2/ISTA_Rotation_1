@@ -1,5 +1,6 @@
 import os.path
 from collections import OrderedDict
+import gc
 from typing import List, Tuple, Union, Optional, Dict
 
 import numpy as np
@@ -16,6 +17,7 @@ import flwr as fl
 from flwr.common import Metrics, FitRes, Parameters, Scalar
 
 from my_server import MyServer
+from pefll_dataset import gen_random_loaders
 
 DEVICE = torch.device('cuda:0' if torch.cuda.is_available() else "cpu")  # Try "cuda" to train on GPU
 
@@ -32,39 +34,15 @@ CLASSES = (
     "truck",
 )
 
-NUM_CLIENTS = 1
+NUM_CLIENTS = 90
 
 BATCH_SIZE = 32
 
 
-def load_datasets():
-    # Download and transform CIFAR-10 (train and test)
-    transform = transforms.Compose(
-        [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
-    )
-    trainset = CIFAR10("./dataset", train=True, download=True, transform=transform)
-    testset = CIFAR10("./dataset", train=False, download=True, transform=transform)
-
-    # Split training set into 10 partitions to simulate the individual dataset
-    partition_size = len(trainset) // NUM_CLIENTS
-    lengths = [partition_size] * NUM_CLIENTS
-    datasets = random_split(trainset, lengths, torch.Generator().manual_seed(42))
-
-    # Split each partition into train/val and create DataLoader
-    trainloaders = []
-    valloaders = []
-    for ds in datasets:
-        len_val = len(ds) // 10  # 10 % validation set
-        len_train = len(ds) - len_val
-        lengths = [len_train, len_val]
-        ds_train, ds_val = random_split(ds, lengths, torch.Generator().manual_seed(42))
-        trainloaders.append(DataLoader(ds_train, batch_size=BATCH_SIZE, shuffle=True))
-        valloaders.append(DataLoader(ds_val, batch_size=BATCH_SIZE))
-    testloader = DataLoader(testset, batch_size=BATCH_SIZE)
-    return trainloaders, valloaders, testloader
-
-
-trainloaders, valloaders, testloader = load_datasets()
+trainloaders, valloaders, testloaders = gen_random_loaders(
+    data_name='cifar10', data_path='./dataset', num_users=NUM_CLIENTS, num_train_users=NUM_CLIENTS, bz=32,
+    partition_type='by_class', classes_per_user=2, alpha_train=None, alpha_test=None, embedding_dir_path=None
+)
 
 
 class Net(nn.Module):
@@ -102,9 +80,9 @@ def train(net, trainloader, epochs: int, verbose=False):
             loss.backward()
             optimizer.step()
             # Metrics
-            epoch_loss += loss
+            epoch_loss += loss.item()
             total += labels.size(0)
-            correct += (torch.max(outputs.data, 1)[1] == labels).sum().item()
+            correct += (torch.max(outputs.data, 1)[1] == labels.argmax(dim=-1)).sum().item()
         epoch_loss /= len(trainloader.dataset)
         epoch_acc = correct / total
         if verbose:
@@ -123,7 +101,7 @@ def test(net, testloader):
             loss += criterion(outputs, labels).item()
             _, predicted = torch.max(outputs.data, 1)
             total += labels.size(0)
-            correct += (predicted == labels).sum().item()
+            correct += (predicted == labels.argmax(dim=-1)).sum().item()
     loss /= len(testloader.dataset)
     accuracy = correct / total
     return loss, accuracy
@@ -151,11 +129,13 @@ class FlowerClient(fl.client.NumPyClient):
     def fit(self, parameters, config):
         set_parameters(self.net, parameters)
         train(self.net, self.trainloader, epochs=1)
+        gc.collect()
         return get_parameters(self.net), len(self.trainloader), {}
 
     def evaluate(self, parameters, config):
         set_parameters(self.net, parameters)
         loss, accuracy = test(self.net, self.valloader)
+        gc.collect()
         return float(loss), len(self.valloader), {"accuracy": float(accuracy)}
 
 
@@ -208,10 +188,10 @@ def weighted_average(metrics: List[Tuple[int, Metrics]]) -> Metrics:
 class SaveModelStrategy(fl.server.strategy.FedAvg):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.server_round_init: int = 10
-        self.net = Net().to(DEVICE)
+        self.server_round_init: int = 0
+        net = Net().to(DEVICE)
         if self.server_round_init:
-            self.net.load_state_dict(
+            net.load_state_dict(
                 torch.load(os.path.join('output', f"model_round_{self.server_round_init}.pth")),
                 strict=True
             )
@@ -235,12 +215,13 @@ class SaveModelStrategy(fl.server.strategy.FedAvg):
             aggregated_ndarrays: List[np.ndarray] = fl.common.parameters_to_ndarrays(aggregated_parameters)
 
             # Convert `List[np.ndarray]` to PyTorch`state_dict`
-            params_dict = zip(self.net.state_dict().keys(), aggregated_ndarrays)
+            net = Net().to(DEVICE)
+            params_dict = zip(net.state_dict().keys(), aggregated_ndarrays)
             state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
-            self.net.load_state_dict(state_dict, strict=True)
+            net.load_state_dict(state_dict, strict=True)
 
             # Save the model
-            torch.save(self.net.state_dict(), os.path.join('output', f"model_round_{server_round}.pth"))
+            torch.save(net.state_dict(), os.path.join('output', f"model_round_{server_round}.pth"))
 
         return aggregated_parameters, aggregated_metrics
 
@@ -249,9 +230,9 @@ class SaveModelStrategy(fl.server.strategy.FedAvg):
 strategy = SaveModelStrategy(
     fraction_fit=1.0,
     fraction_evaluate=0.5,
-    min_fit_clients=1,
-    min_evaluate_clients=1,
-    min_available_clients=1,
+    min_fit_clients=NUM_CLIENTS,
+    min_evaluate_clients=NUM_CLIENTS,
+    min_available_clients=NUM_CLIENTS,
     evaluate_metrics_aggregation_fn=weighted_average,  # <-- pass the metric aggregation function
 )
 
