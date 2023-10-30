@@ -18,29 +18,22 @@ from flwr.common import Metrics, FitRes, Parameters, Scalar
 
 from my_server import MyServer
 from pefll_dataset import gen_random_loaders
+from utils import set_seed
+
+set_seed(42)
 
 DEVICE = torch.device('cuda:0' if torch.cuda.is_available() else "cpu")  # Try "cuda" to train on GPU
 
-CLASSES = (
-    "plane",
-    "car",
-    "bird",
-    "cat",
-    "deer",
-    "dog",
-    "frog",
-    "horse",
-    "ship",
-    "truck",
-)
+# CLASSES = ("plane", "car", "bird", "cat", "deer", "dog", "frog", "horse", "ship", "truck",)
 
-NUM_CLIENTS = 90
+NUM_CLIENTS = 100
+NUM_TRAIN_CLIENTS = int(NUM_CLIENTS * .9)
 
 BATCH_SIZE = 32
 
 
 trainloaders, valloaders, testloaders = gen_random_loaders(
-    data_name='cifar10', data_path='./dataset', num_users=NUM_CLIENTS, num_train_users=NUM_CLIENTS, bz=32,
+    data_name='cifar10', data_path='./dataset', num_users=NUM_CLIENTS, num_train_users=NUM_TRAIN_CLIENTS, bz=32,
     partition_type='by_class', classes_per_user=2, alpha_train=None, alpha_test=None, embedding_dir_path=None
 )
 
@@ -99,7 +92,7 @@ def test(net, testloader):
             images, labels = images.to(DEVICE), labels.to(DEVICE)
             outputs = net(images)
             loss += criterion(outputs, labels).item()
-            _, predicted = torch.max(outputs.data, 1)
+            _, predicted = torch.max(outputs.data, dim=-1)
             total += labels.size(0)
             correct += (predicted == labels.argmax(dim=-1)).sum().item()
     loss /= len(testloader.dataset)
@@ -136,14 +129,14 @@ class FlowerClient(fl.client.NumPyClient):
         set_parameters(self.net, parameters)
         loss, accuracy = test(self.net, self.valloader)
         gc.collect()
-        return float(loss), len(self.valloader), {"accuracy": float(accuracy)}
+        return float(loss), len(self.valloader.dataset), {"accuracy": float(accuracy)}
 
 
 def client_fn(cid: str) -> FlowerClient:
     """Create a Flower client representing a single organization."""
 
     # Load model
-    server_round_init: int = 10
+    server_round_init: int = 0
     net = Net().to(DEVICE)
     if server_round_init:
         net.load_state_dict(
@@ -162,13 +155,13 @@ def client_fn(cid: str) -> FlowerClient:
 
 
 # Create FedAvg strategy
-strategy = fl.server.strategy.FedAvg(
-    fraction_fit=1.0,  # Sample 100% of available clients for training
-    fraction_evaluate=0.5,  # Sample 50% of available clients for evaluation
-    min_fit_clients=10,  # Never sample less than 10 clients for training
-    min_evaluate_clients=5,  # Never sample less than 5 clients for evaluation
-    min_available_clients=10,  # Wait until all 10 clients are available
-)
+# strategy = fl.server.strategy.FedAvg(
+#     fraction_fit=1.0,  # Sample 100% of available clients for training
+#     fraction_evaluate=0.5,  # Sample 50% of available clients for evaluation
+#     min_fit_clients=10,  # Never sample less than 10 clients for training
+#     min_evaluate_clients=5,  # Never sample less than 5 clients for evaluation
+#     min_available_clients=10,  # Wait until all 10 clients are available
+# )
 
 # Specify client resources if you need GPU (defaults to 1 CPU and 0 GPU)
 client_resources = None
@@ -228,20 +221,20 @@ class SaveModelStrategy(fl.server.strategy.FedAvg):
 
 # Create FedAvg strategy
 strategy = SaveModelStrategy(
-    fraction_fit=1.0,
-    fraction_evaluate=0.5,
-    min_fit_clients=NUM_CLIENTS,
-    min_evaluate_clients=NUM_CLIENTS,
-    min_available_clients=NUM_CLIENTS,
+    fraction_fit=1.,  # Sample 100% of available clients for training
+    fraction_evaluate=1.,  # Sample 50% of available clients for evaluation
+    # min_fit_clients=NUM_TRAIN_CLIENTS,  # Never sample less than 10 clients for training
+    # min_evaluate_clients=5,  # Never sample less than 5 clients for evaluation
+    min_available_clients=NUM_TRAIN_CLIENTS,  # Wait until all 10 clients are available
     evaluate_metrics_aggregation_fn=weighted_average,  # <-- pass the metric aggregation function
 )
 
 # Start simulation
 fl.simulation.start_simulation(
     client_fn=client_fn,
-    num_clients=NUM_CLIENTS,
+    num_clients=NUM_TRAIN_CLIENTS,
     server=MyServer(client_manager=SimpleClientManager(), strategy=strategy),
-    config=fl.server.ServerConfig(num_rounds=10),
+    config=fl.server.ServerConfig(num_rounds=1000),
     # strategy=strategy,
     client_resources=client_resources,
 )
