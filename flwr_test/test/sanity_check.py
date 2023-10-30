@@ -59,8 +59,8 @@ def test(net, testloader):
             outputs = net(images.to(DEVICE))
             loss += criterion(outputs, labels.to(DEVICE)).item()
             total += labels.size(0)
-            correct += (torch.max(outputs.data, 1)[1] == labels).sum().item()
-            # correct += (torch.max(outputs.data, 1)[1] == torch.max(labels, 1)[1]).sum().item()
+            # correct += (torch.max(outputs.data, 1)[1] == labels).sum().item()
+            correct += (torch.max(outputs.data, 1)[1] == torch.max(labels, 1)[1]).sum().item()
     return loss / len(testloader.dataset), correct / total
 
 
@@ -73,7 +73,8 @@ def load_data():
     return DataLoader(trainset, batch_size=32, shuffle=True), DataLoader(testset, batch_size=32, shuffle=False)
 
 
-NUM_CLIENTS = 5
+NUM_CLIENTS = 100
+NUM_TRAIN_CLIENTS = 90
 trainloaders, valloaders, testloaders = gen_random_loaders(
     data_name='cifar10', data_path='./dataset', num_users=NUM_CLIENTS, num_train_users=NUM_CLIENTS, bz=32,
     partition_type='by_class', classes_per_user=2, alpha_train=None, alpha_test=None, embedding_dir_path=None
@@ -85,27 +86,33 @@ trainloaders, valloaders, testloaders = gen_random_loaders(
 
 # Load model and data (simple CNN, CIFAR-10)
 net = Net().to(DEVICE)
-trainloader, testloader = load_data()
-
-state_dict = torch.load('output/model_round_1000.pth')
-net.load_state_dict(state_dict)
-
-t_all, v_all, tt_all = get_datasets('cifar10', './dataset', one_hot=False)
+# trainloader, testloader = load_data()
+#
+# state_dict = torch.load('output/model_round_1000.pth')
+# net.load_state_dict(state_dict)
+#
+# t_all, v_all, tt_all = get_datasets('cifar10', './dataset', one_hot=False)
 # out = test(net, DataLoader(t_all, batch_size=32))
 # print(out)
-out = test(net, DataLoader(v_all, batch_size=32))
-print(out)
-out = test(net, DataLoader(tt_all, batch_size=32))
-print(out)
+# out = test(net, DataLoader(v_all, batch_size=32))
+# print(out)
+# out = test(net, DataLoader(tt_all, batch_size=32))
+# print(out)
 # out = test(net, trainloader)
 # print(out)
 # out = test(net, testloader)
 # print(out)
 
+rs = []
 
-for epoch in range(100):
-    train(net, trainloader, 1)
-    ret = test(net, testloader)
-    print(epoch, ret)
+for idx in range(NUM_TRAIN_CLIENTS):
+    for epoch in range(100):
+        train(net, trainloaders[idx], 1)
+        ret = test(net, valloaders[idx])
+        # print(epoch, ret)
+    # ret = test(net, testloaders[idx])
+    rs.append(ret[1])
+    print(idx, ret)
 
+print(rs)
 exit(0)
