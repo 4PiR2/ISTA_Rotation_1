@@ -87,14 +87,14 @@ trainloaders, valloaders, testloaders = gen_random_loaders(
 net = Net().to(DEVICE)
 trainloader, testloader = load_data()
 
-state_dict = torch.load('output/model_round_10.pth')
+state_dict = torch.load('output/model_round_1000.pth')
 net.load_state_dict(state_dict)
 
 t_all, v_all, tt_all = get_datasets('cifar10', './dataset', one_hot=False)
 # out = test(net, DataLoader(t_all, batch_size=32))
 # print(out)
-# out = test(net, DataLoader(v_all, batch_size=32))
-# print(out)
+out = test(net, DataLoader(v_all, batch_size=32))
+print(out)
 out = test(net, DataLoader(tt_all, batch_size=32))
 print(out)
 # out = test(net, trainloader)

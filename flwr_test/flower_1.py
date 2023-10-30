@@ -123,7 +123,7 @@ class FlowerClient(fl.client.NumPyClient):
         set_parameters(self.net, parameters)
         train(self.net, self.trainloader, epochs=1)
         gc.collect()
-        return get_parameters(self.net), len(self.trainloader), {}
+        return get_parameters(self.net), len(self.trainloader.dataset), {}
 
     def evaluate(self, parameters, config):
         set_parameters(self.net, parameters)
@@ -221,8 +221,8 @@ class SaveModelStrategy(fl.server.strategy.FedAvg):
 
 # Create FedAvg strategy
 strategy = SaveModelStrategy(
-    fraction_fit=1.,  # Sample 100% of available clients for training
-    fraction_evaluate=1.,  # Sample 50% of available clients for evaluation
+    fraction_fit=.1,  # Sample 100% of available clients for training
+    fraction_evaluate=.1,  # Sample 50% of available clients for evaluation
     # min_fit_clients=NUM_TRAIN_CLIENTS,  # Never sample less than 10 clients for training
     # min_evaluate_clients=5,  # Never sample less than 5 clients for evaluation
     min_available_clients=NUM_TRAIN_CLIENTS,  # Wait until all 10 clients are available
