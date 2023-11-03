@@ -9,7 +9,7 @@ from torchvision.transforms import Compose, ToTensor, Normalize
 from torch.utils.data import DataLoader
 from torchvision.datasets import CIFAR10
 
-from pefll_dataset import gen_random_loaders, get_datasets
+from PeFLL.dataset import gen_random_loaders, get_datasets
 
 # #############################################################################
 # Regular PyTorch pipeline: nn.Module, train, test, and DataLoader
