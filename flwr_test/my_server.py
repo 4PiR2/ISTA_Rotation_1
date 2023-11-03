@@ -37,6 +37,12 @@ ReconnectResultsAndFailures = Tuple[
 
 
 class MyServer(flwr.server.Server):
+    def __init__(self, client_manager: ClientManager, strategy: Optional[Strategy] = None,
+                 init_round: int = 1, eval_interval: int = 1):
+        super().__init__(client_manager=client_manager, strategy=strategy)
+        self.init_round: int = init_round
+        self.eval_interval: int = eval_interval
+
     def fit(self, num_rounds: int, timeout: Optional[float]) -> History:
         """Run federated averaging for a number of rounds."""
         history = History()
@@ -60,7 +66,7 @@ class MyServer(flwr.server.Server):
         log(INFO, "FL starting")
         start_time = timeit.default_timer()
 
-        for current_round in range(1, num_rounds + 1):
+        for current_round in range(self.init_round, self.init_round + num_rounds):
             # Train model and replace previous global model
             res_fit = self.fit_round(
                 server_round=current_round,
@@ -91,6 +97,9 @@ class MyServer(flwr.server.Server):
                     server_round=current_round, metrics=metrics_cen
                 )
 
+            if current_round % self.eval_interval:
+                continue
+
             # Evaluate model on a sample of available clients
             res_fed = self.evaluate_round(server_round=current_round, timeout=timeout)
             if res_fed is not None:
@@ -102,7 +111,6 @@ class MyServer(flwr.server.Server):
                     history.add_metrics_distributed(
                         server_round=current_round, metrics=evaluate_metrics_fed
                     )
-                    print('evaluate_metrics_fed:', evaluate_metrics_fed)
 
         # Bookkeeping
         end_time = timeit.default_timer()

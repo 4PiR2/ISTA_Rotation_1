@@ -13,7 +13,7 @@ from PeFLL.models import CNNTarget
 from PeFLL.utils import set_seed, get_device
 
 
-if __name__ == '__main__':
+def main():
     DEVICE = get_device()
 
     NUM_CLIENTS = 100
@@ -25,8 +25,10 @@ if __name__ == '__main__':
 
     set_seed(SEED)
     trainloaders, valloaders, testloaders = gen_random_loaders(
-        data_name='cifar10', data_path='./dataset', num_users=NUM_CLIENTS, num_train_users=NUM_TRAIN_CLIENTS, bz=32,
-        partition_type='by_class', classes_per_user=2, alpha_train=None, alpha_test=None, embedding_dir_path=None
+        data_name='cifar10', data_path='./dataset',
+        num_users=NUM_CLIENTS, num_train_users=NUM_TRAIN_CLIENTS, bz=BATCH_SIZE,
+        partition_type='by_class', classes_per_user=2,
+        alpha_train=None, alpha_test=None, embedding_dir_path=None
     )
 
     # Load model
@@ -59,7 +61,7 @@ if __name__ == '__main__':
         fraction_evaluate=.1,  # Sample 50% of available clients for evaluation
         min_available_clients=NUM_TRAIN_CLIENTS,  # Wait until all 10 clients are available
         state_dict_keys=CNNTarget().state_dict().keys(),
-        server_round_init=server_round_init,
+        # server_round_init=server_round_init,
     )
 
     # Start simulation
@@ -72,3 +74,7 @@ if __name__ == '__main__':
     )
 
     a = 0
+
+
+if __name__ == '__main__':
+    main()
