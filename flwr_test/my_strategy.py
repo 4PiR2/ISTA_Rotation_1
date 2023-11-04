@@ -1,13 +1,13 @@
-import os
 from collections import OrderedDict
+import os
 from typing import List, Tuple, Union, Optional, Dict
 
 import flwr as fl
-import numpy as np
-import torch
-from flwr.common import FitRes, Parameters, Scalar, Metrics, EvaluateRes
+from flwr.common import FitRes, Parameters, Scalar, Metrics, EvaluateRes, FitIns, EvaluateIns
 from flwr.server import ClientManager
 from flwr.server.client_proxy import ClientProxy
+import numpy as np
+import torch
 
 from PeFLL.utils import get_device
 
@@ -35,6 +35,40 @@ class SaveModelStrategy(fl.server.strategy.FedAvg):
         )
         self.state_dict_keys = state_dict_keys
 
+    def initialize_parameters(self, client_manager: ClientManager) -> Optional[Parameters]:
+        parameters = super().initialize_parameters(client_manager)
+        if parameters is None:
+            state_dict = torch.load(os.path.join('output', 'bak', f'model_round_{1000}.pth'))
+            # parameters = fl.common.ndarrays_to_parameters(list(state_dict.values()))
+        return parameters
+
+    def configure_fit(self, server_round: int, parameters: Parameters, client_manager: ClientManager) -> List[
+        Tuple[ClientProxy, FitIns]]:
+        client_config_pairs = super().configure_fit(server_round, parameters, client_manager)
+        client_config_pairs_updated: List[Tuple[ClientProxy, FitIns]] = []
+        for client, fit_ins in client_config_pairs:
+            config = {
+                **fit_ins.config,
+                'cid': client.cid,
+                'lr': 2e-3,
+                'momentum': .9,
+                'weight_decay': 5e-5,
+            }
+            client_config_pairs_updated.append((client, FitIns(fit_ins.parameters, config)))
+        return client_config_pairs_updated
+
+    def configure_evaluate(self, server_round: int, parameters: Parameters, client_manager: ClientManager) -> List[
+        Tuple[ClientProxy, EvaluateIns]]:
+        client_config_pairs = super().configure_evaluate(server_round, parameters, client_manager)
+        client_config_pairs_updated: List[Tuple[ClientProxy, EvaluateIns]] = []
+        for client, evaluate_ins in client_config_pairs:
+            config = {
+                **evaluate_ins.config,
+                'cid': client.cid,
+            }
+            client_config_pairs_updated.append((client, EvaluateIns(evaluate_ins.parameters, config)))
+        return client_config_pairs_updated
+
     def aggregate_fit(
         self,
         server_round: int,
@@ -45,7 +79,7 @@ class SaveModelStrategy(fl.server.strategy.FedAvg):
         # Call aggregate_fit from base class (FedAvg) to aggregate parameters and metrics
         aggregated_parameters, aggregated_metrics = super().aggregate_fit(server_round, results, failures)
 
-        if aggregated_parameters is not None:
+        if aggregated_parameters is not None and server_round % 10 == 0:
             print(f"Saving round {server_round} aggregated_parameters...")
 
             # Convert `Parameters` to `List[np.ndarray]`

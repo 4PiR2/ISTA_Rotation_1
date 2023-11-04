@@ -38,7 +38,7 @@ ReconnectResultsAndFailures = Tuple[
 
 class MyServer(flwr.server.Server):
     def __init__(self, client_manager: ClientManager, strategy: Optional[Strategy] = None,
-                 init_round: int = 1, eval_interval: int = 1):
+                 init_round: int = 0, eval_interval: int = 1):
         super().__init__(client_manager=client_manager, strategy=strategy)
         self.init_round: int = init_round
         self.eval_interval: int = eval_interval

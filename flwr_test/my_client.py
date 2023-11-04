@@ -6,16 +6,18 @@ import flwr as fl
 import numpy as np
 import torch
 
-from PeFLL.utils import get_device
-
+from PeFLL.dataset import gen_random_loaders
+from PeFLL.models import CNNTarget
+from PeFLL.utils import get_device, set_seed
 
 DEVICE = get_device()
 
 
-def train(net, trainloader, epochs: int, verbose=False):
+def train(net, trainloader, epochs: int = 1, verbose: bool = True,
+          lr: float = 2e-3, momentum: float = .9, weight_decay: float = 5e-5):
     """Train the network on the training set."""
     criterion = torch.nn.CrossEntropyLoss()
-    optimizer = torch.optim.SGD(net.parameters(), lr=2e-3, momentum=.9, weight_decay=5e-5)
+    optimizer = torch.optim.SGD(net.parameters(), lr=lr, momentum=momentum, weight_decay=weight_decay)
     net.train()
     for epoch in range(epochs):
         correct, epoch_loss = 0, 0.
@@ -66,22 +68,41 @@ def set_parameters(net, parameters: List[np.ndarray]):
 
 
 class FlowerClient(fl.client.NumPyClient):
-    def __init__(self, net, trainloader, valloader):
+    def __init__(self, *args, **kwargs):
+
+        net = CNNTarget()
+
+        NUM_CLIENTS = 100
+        NUM_TRAIN_CLIENTS = int(NUM_CLIENTS * .9)
+        BATCH_SIZE = 32
+        SEED = 42
+
+        set_seed(SEED)
+        trainloaders, valloaders, testloaders = gen_random_loaders(
+            data_name='cifar10', data_path='./dataset',
+            num_users=NUM_CLIENTS, num_train_users=NUM_TRAIN_CLIENTS, bz=BATCH_SIZE,
+            partition_type='by_class', classes_per_user=2,
+            alpha_train=None, alpha_test=None, embedding_dir_path=None
+        )
+
         self.net = net.to(DEVICE)
-        self.trainloader = trainloader
-        self.valloader = valloader
+        self.trainloaders = trainloaders
+        self.valloaders = valloaders
 
     def get_parameters(self, config):
         return get_parameters(self.net)
 
     def fit(self, parameters, config):
         set_parameters(self.net, parameters)
-        train(self.net, self.trainloader, epochs=1, verbose=True)
+        trainloader = self.trainloaders[int(config['cid'])]
+        train(self.net, trainloader, epochs=1, verbose=True,
+              lr=config['lr'], momentum=config['momentum'], weight_decay=config['weight_decay'])
         gc.collect()
-        return get_parameters(self.net), len(self.trainloader.dataset), {}
+        return get_parameters(self.net), len(trainloader.dataset), {}
 
     def evaluate(self, parameters, config):
         set_parameters(self.net, parameters)
-        loss, accuracy = test(self.net, self.valloader)
+        valloader = self.valloaders[int(config['cid'])]
+        loss, accuracy = test(self.net, valloader)
         gc.collect()
-        return float(loss), len(self.valloader.dataset), {'accuracy': float(accuracy)}
+        return float(loss), len(valloader.dataset), {'accuracy': float(accuracy)}
