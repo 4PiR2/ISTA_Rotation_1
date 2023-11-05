@@ -17,10 +17,13 @@ from flwr.common import (
 )
 from flwr.common.logger import log
 from flwr.common.typing import GetParametersIns
-from flwr.server.client_manager import ClientManager
+from flwr.server.client_manager import ClientManager, SimpleClientManager
 from flwr.server.client_proxy import ClientProxy
 from flwr.server.history import History
 from flwr.server.strategy import FedAvg, Strategy
+
+from PeFLL.models import CNNTarget
+from my_strategy import SaveModelStrategy
 
 FitResultsAndFailures = Tuple[
     List[Tuple[ClientProxy, FitRes]],
@@ -117,3 +120,33 @@ class MyServer(flwr.server.Server):
         elapsed = end_time - start_time
         log(INFO, "FL finished in %s", elapsed)
         return history
+
+
+def make_server():
+    NUM_CLIENTS = 100
+    NUM_TRAIN_CLIENTS = int(NUM_CLIENTS * .9)
+
+    # Create FedAvg strategy
+    strategy = SaveModelStrategy(
+        fraction_fit=.1,  # Sample 100% of available clients for training
+        fraction_evaluate=1.,  # Sample 50% of available clients for evaluation
+        min_available_clients=NUM_TRAIN_CLIENTS,  # Wait until all 10 clients are available
+        state_dict_keys=CNNTarget().state_dict().keys(),
+    )
+
+    server = MyServer(client_manager=SimpleClientManager(), strategy=strategy, init_round=0, eval_interval=10)
+    return server
+
+
+def main():
+    server = make_server()
+    server_port = 18080
+    flwr.server.start_server(
+        server_address=f'0.0.0.0:{server_port}',
+        server=server,
+        config=flwr.server.ServerConfig(num_rounds=1000),
+    )
+
+
+if __name__ == '__main__':
+    main()

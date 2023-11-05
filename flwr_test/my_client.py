@@ -106,3 +106,13 @@ class FlowerClient(fl.client.NumPyClient):
         loss, accuracy = test(self.net, valloader)
         gc.collect()
         return float(loss), len(valloader.dataset), {'accuracy': float(accuracy)}
+
+
+def main():
+    server_ip = '127.0.0.1'
+    server_port = 18080
+    fl.client.start_numpy_client(server_address=f'{server_ip}:{server_port}', client=FlowerClient())
+
+
+if __name__ == '__main__':
+    main()
