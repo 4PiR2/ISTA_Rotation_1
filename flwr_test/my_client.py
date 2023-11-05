@@ -41,6 +41,7 @@ class FlowerClient(fl.client.NumPyClient):
             partition_type='by_class', classes_per_user=2,
             alpha_train=None, alpha_test=None, embedding_dir_path=None
         )
+        # TODO set_seed()
         return super().get_properties(config)
 
     def get_parameters(self, config):

@@ -1,4 +1,5 @@
 import flwr as fl
+import torch
 
 from my_client import FlowerClient
 from my_server import make_server
@@ -7,17 +8,18 @@ from utils import run
 
 
 def main():
-    SIMULATION = True
+    SIMULATION = False
 
     if SIMULATION:
         server = make_server(mode='simulated')
         num_train_clients = server.strategy.num_train_clients
+        num_gpus = torch.cuda.device_count()
 
         def client_fn(cid: str) -> FlowerClient:
             client = FlowerClient(cid)
             # TODO
             config = {
-                'device': 'cpu',
+                'device': f'cuda:{int(cid) % num_gpus}' if num_gpus else 'cpu',
                 'num_train_clients': num_train_clients,
             }
             client.get_properties(config)
@@ -37,10 +39,12 @@ def main():
         )
     else:
         p_server = run(['python3', 'my_server.py'], blocking=False)
-        p_clients = [run(['python3', 'my_client.py'], blocking=False) for _ in range(9)]
+        # TODO
+        min_available_clients = 9
+        p_clients = [run(['python3', 'my_client.py'], blocking=False) for _ in range(min_available_clients)]
         while True:
             for i, p in enumerate([p_server, *p_clients]):
-                rc = p.poll(timeout=0.)
+                rc = p.poll()
                 while line_out := p.stdout.readline():
                     print(f'[C{i}]\t', line_out, end='')
                 while line_err := p.stderr.readline():

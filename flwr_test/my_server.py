@@ -47,6 +47,9 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
             mode: str,
             init_round: int = 0,
             eval_interval: int = 1,
+            optimizer_inner_lr: float = 2e-3,
+            optimizer_inner_momentum: float = .9,
+            optimizer_inner_weight_decay: float = 5e-5,
             *args, **kwargs
     ):
         super().__init__(
@@ -63,6 +66,9 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
         self.mode: str = mode
         self.init_round: int = init_round
         self.eval_interval: int = eval_interval
+        self.optimizer_inner_lr: float = optimizer_inner_lr
+        self.optimizer_inner_momentum: float = optimizer_inner_momentum
+        self.optimizer_inner_weight_decay: float = optimizer_inner_weight_decay
 
     def initialize_parameters(self, client_manager: ClientManager) -> Optional[Parameters]:
         parameters = super().initialize_parameters(client_manager)
@@ -83,18 +89,16 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
             cids = [all_cids.index(client.cid) for client, _ in client_config_pairs]
         else:
             cids = None
-        print('XXX', cids)
         return cids
 
     def configure_fit(self, server_round: int, parameters: Parameters, client_manager: ClientManager) -> List[
         Tuple[ClientProxy, FitIns]]:
         client_config_pairs = super().configure_fit(server_round, parameters, client_manager)
 
-        # TODO
         optimizer_config = {
-            'lr': 2e-3,
-            'momentum': .9,
-            'weight_decay': 5e-5,
+            'lr': self.optimizer_inner_lr,
+            'momentum': self.optimizer_inner_momentum,
+            'weight_decay': self.optimizer_inner_weight_decay,
         }
 
         client_config_pairs_updated: List[Tuple[ClientProxy, FitIns]] = []
@@ -143,7 +147,7 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
 
             # Save the model
             # TODO
-            torch.save(state_dict, os.path.join('output', f"model_round_{server_round}.pth"))
+            torch.save(state_dict, os.path.join('output', f'model_round_{server_round}.pth'))
 
         return aggregated_parameters, aggregated_metrics
 
@@ -199,9 +203,9 @@ class FlowerServer(flwr.server.Server):
             history.add_metrics_centralized(server_round=0, metrics=res[1])
 
         for i, (cid, client) in enumerate(self._client_manager.all().items()):
-            # TODO
+            num_gpus = torch.cuda.device_count()
             config = {
-                'device': 'cpu',
+                'device': f'cuda:{i % num_gpus}' if num_gpus else 'cpu',
                 'num_train_clients': self.strategy.num_train_clients,
             }
             _ = client.get_properties(ins=GetPropertiesIns(config), timeout=None)
@@ -265,7 +269,7 @@ class FlowerServer(flwr.server.Server):
 
 def make_server(mode: str):
     if mode in ['simulated', 'distributed']:
-        NUM_CLIENTS = 10
+        NUM_CLIENTS = 100
         NUM_TRAIN_CLIENTS = int(NUM_CLIENTS * .9)
 
         # Create FedAvg strategy
@@ -280,7 +284,7 @@ def make_server(mode: str):
             eval_interval=10,
         )
     elif mode in ['multiplex']:
-        NUM_TRAIN_CLIENTS = 20
+        NUM_TRAIN_CLIENTS = 90
 
         # Create FedAvg strategy
         strategy = FlowerStrategy(
@@ -292,6 +296,9 @@ def make_server(mode: str):
             mode=mode,
             init_round=0,
             eval_interval=10,
+            optimizer_inner_lr=2e-3,
+            optimizer_inner_momentum=.9,
+            optimizer_inner_weight_decay=5e-5,
         )
     else:
         strategy = None
