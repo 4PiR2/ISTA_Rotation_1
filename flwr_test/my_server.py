@@ -16,7 +16,7 @@ from flwr.common import (
     Scalar,
 )
 from flwr.common.logger import log
-from flwr.common.typing import GetParametersIns
+from flwr.common.typing import GetParametersIns, GetPropertiesIns
 from flwr.server.client_manager import ClientManager, SimpleClientManager
 from flwr.server.client_proxy import ClientProxy
 from flwr.server.history import History
@@ -41,14 +41,18 @@ ReconnectResultsAndFailures = Tuple[
 
 class MyServer(flwr.server.Server):
     def __init__(self, client_manager: ClientManager, strategy: Optional[Strategy] = None,
-                 init_round: int = 0, eval_interval: int = 1):
+                 init_round: int = 0, eval_interval: int = 1, num_train_clients: int = 9):
         super().__init__(client_manager=client_manager, strategy=strategy)
         self.init_round: int = init_round
         self.eval_interval: int = eval_interval
+        self.num_train_clients: int = num_train_clients
 
     def fit(self, num_rounds: int, timeout: Optional[float]) -> History:
         """Run federated averaging for a number of rounds."""
         history = History()
+
+        while self._client_manager.num_available() < self.strategy.min_available_clients:
+            pass
 
         # Initialize parameters
         log(INFO, "Initializing global parameters")
@@ -64,6 +68,14 @@ class MyServer(flwr.server.Server):
             )
             history.add_loss_centralized(server_round=0, loss=res[0])
             history.add_metrics_centralized(server_round=0, metrics=res[1])
+
+        for i, (cid, client) in enumerate(self._client_manager.all().items()):
+            # TODO
+            config = {
+                'device': 'cpu',
+                'num_train_clients': self.num_train_clients,
+            }
+            _ = client.get_properties(ins=GetPropertiesIns(config), timeout=None)
 
         # Run federated learning for num_rounds
         log(INFO, "FL starting")
@@ -132,14 +144,31 @@ def make_server():
         fraction_evaluate=1.,  # Sample 50% of available clients for evaluation
         min_available_clients=NUM_TRAIN_CLIENTS,  # Wait until all 10 clients are available
         state_dict_keys=CNNTarget().state_dict().keys(),
+        mode='distributed',
     )
 
-    server = MyServer(client_manager=SimpleClientManager(), strategy=strategy, init_round=0, eval_interval=10)
+    server = MyServer(client_manager=SimpleClientManager(), strategy=strategy, init_round=0, eval_interval=10, num_train_clients=NUM_TRAIN_CLIENTS)
+    return server
+
+
+def make_server2():
+    NUM_TRAIN_CLIENTS = 2
+
+    # Create FedAvg strategy
+    strategy = SaveModelStrategy(
+        fraction_fit=1.,  # Sample 100% of available clients for training
+        fraction_evaluate=1.,  # Sample 50% of available clients for evaluation
+        min_available_clients=NUM_TRAIN_CLIENTS,  # Wait until all 10 clients are available
+        state_dict_keys=CNNTarget().state_dict().keys(),
+        mode='multiplex',
+    )
+
+    server = MyServer(client_manager=SimpleClientManager(), strategy=strategy, init_round=0, eval_interval=10, num_train_clients=NUM_TRAIN_CLIENTS)
     return server
 
 
 def main():
-    server = make_server()
+    server = make_server2()
     server_port = 18080
     flwr.server.start_server(
         server_address=f'0.0.0.0:{server_port}',

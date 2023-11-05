@@ -3,13 +3,14 @@ import flwr as fl
 from my_client import FlowerClient
 from my_server import make_server
 from PeFLL.utils import get_device
+from utils import run
 
 
 def main():
     NUM_CLIENTS = 100
     NUM_TRAIN_CLIENTS = int(NUM_CLIENTS * .9)
 
-    SIMULATION = True
+    SIMULATION = False
 
     if SIMULATION:
         server = make_server()
@@ -30,7 +31,17 @@ def main():
             client_resources=client_resources,
         )
     else:
-        pass
+        p_server = run(['python3', 'my_server.py'], blocking=False)
+        p_clients = [run(['python3', 'my_client.py'], blocking=False) for _ in range(9)]
+        while True:
+            for i, p in enumerate([p_server, *p_clients]):
+                rc = p.poll(timeout=0.)
+                while line_out := p.stdout.readline():
+                    print(f'[C{i}]\t', line_out, end='')
+                while line_err := p.stderr.readline():
+                    print(f'[C{i}]\t', line_err, end='')
+                # if rc is not None:
+                #     break
 
     a = 0
 
