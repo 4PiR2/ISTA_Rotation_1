@@ -1,9 +1,12 @@
-import flwr as fl
+import os.path
+
+import flwr
 import torch
 
-from my_client import FlowerClient
-from my_server import make_server
 from PeFLL.utils import get_device
+
+from flower_client import FlowerClient
+from flower_server import make_server
 from utils import run
 
 
@@ -30,28 +33,36 @@ def main():
         client_resources = {'num_cpus': 1, 'num_gpus': 1} if DEVICE.type == 'cuda' else None
 
         # Start simulation
-        fl.simulation.start_simulation(
+        flwr.simulation.start_simulation(
             client_fn=client_fn,
             num_clients=server.strategy.num_train_clients,
             server=server,
-            config=fl.server.ServerConfig(num_rounds=1000),
+            config=flwr.server.ServerConfig(num_rounds=1000),
             client_resources=client_resources,
         )
     else:
-        p_server = run(['python3', 'my_server.py'], blocking=False)
+        p_server = run(['python3', 'flower_server.py'], blocking=False)
         # TODO
         min_available_clients = 9
-        p_clients = [run(['python3', 'my_client.py'], blocking=False) for _ in range(min_available_clients)]
+        p_clients = [run(['python3', 'flower_client.py'], blocking=False) for _ in range(min_available_clients)]
+        os.makedirs(os.path.join('outputs', 'logs'), exist_ok=True)
+        log_files = [open(os.path.join('outputs', 'logs', f'C{i}.txt'), 'w') for i in range(1+len(p_clients))]
+        rcs = [None] * len(log_files)
         while True:
             for i, p in enumerate([p_server, *p_clients]):
-                rc = p.poll()
+                rcs[i] = p.poll()
                 while line_out := p.stdout.readline():
+                    log_files[i].write(line_out)
+                    log_files[i].flush()
                     print(f'[C{i}]\t', line_out, end='')
                 while line_err := p.stderr.readline():
+                    log_files[i].write(line_err)
+                    log_files[i].flush()
                     print(f'[C{i}]\t', line_err, end='')
-                # if rc is not None:
-                #     break
-
+            if None not in rcs:
+                break
+        for log_file in log_files:
+            log_file.close()
     a = 0
 
 

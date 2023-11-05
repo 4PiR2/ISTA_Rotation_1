@@ -73,8 +73,7 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
     def initialize_parameters(self, client_manager: ClientManager) -> Optional[Parameters]:
         parameters = super().initialize_parameters(client_manager)
         if parameters is None and self.init_round:
-            # TODO
-            state_dict = torch.load(os.path.join('output', 'bak', f'model_round_{self.init_round}.pth'))
+            state_dict = torch.load(os.path.join('outputs', 'checkpoints', f'model_round_{self.init_round}.pth'))
             parameters = flwr.common.ndarrays_to_parameters(list(state_dict.values()))
         return parameters
 
@@ -146,8 +145,8 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
             state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
 
             # Save the model
-            # TODO
-            torch.save(state_dict, os.path.join('output', f'model_round_{server_round}.pth'))
+            os.makedirs(os.path.join('outputs', 'checkpoints'), exist_ok=True)
+            torch.save(state_dict, os.path.join('outputs', 'checkpoints', f'model_round_{server_round}.pth'))
 
         return aggregated_parameters, aggregated_metrics
 

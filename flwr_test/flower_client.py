@@ -3,7 +3,7 @@ import gc
 from logging import DEBUG, INFO
 from typing import List, Dict, Tuple
 
-import flwr as fl
+import flwr
 from flwr.common import Config, Scalar
 from flwr.common.logger import log
 import numpy as np
@@ -15,7 +15,7 @@ from PeFLL.models import CNNTarget
 from PeFLL.utils import set_seed
 
 
-class FlowerClient(fl.client.NumPyClient):
+class FlowerClient(flwr.client.NumPyClient):
     def __init__(self, *args, **kwargs):
         self.net: torch.nn.Module = CNNTarget()
         self.device: torch.device = torch.device('cpu')
@@ -80,7 +80,7 @@ class FlowerClient(fl.client.NumPyClient):
             epoch_loss /= len(trainloader.dataset)
             epoch_acc = correct / len(trainloader.dataset)
 
-            verbose = True
+            verbose = False
             if verbose:
                 log(DEBUG, f"Epoch {epoch}: train loss {epoch_loss}, accuracy {epoch_acc}")
 
@@ -114,7 +114,7 @@ def main():
     # TODO
     server_ip = '127.0.0.1'
     server_port = 18080
-    fl.client.start_numpy_client(server_address=f'{server_ip}:{server_port}', client=FlowerClient())
+    flwr.client.start_numpy_client(server_address=f'{server_ip}:{server_port}', client=FlowerClient())
 
 
 if __name__ == '__main__':
