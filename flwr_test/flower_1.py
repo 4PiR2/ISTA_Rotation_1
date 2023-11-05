@@ -7,16 +7,21 @@ from utils import run
 
 
 def main():
-    NUM_CLIENTS = 100
-    NUM_TRAIN_CLIENTS = int(NUM_CLIENTS * .9)
-
-    SIMULATION = False
+    SIMULATION = True
 
     if SIMULATION:
-        server = make_server()
+        server = make_server(mode='simulated')
+        num_train_clients = server.strategy.num_train_clients
 
         def client_fn(cid: str) -> FlowerClient:
-            return FlowerClient()
+            client = FlowerClient(cid)
+            # TODO
+            config = {
+                'device': 'cpu',
+                'num_train_clients': num_train_clients,
+            }
+            client.get_properties(config)
+            return client
 
         # Specify client resources if you need GPU (defaults to 1 CPU and 0 GPU)
         DEVICE = get_device()
@@ -25,7 +30,7 @@ def main():
         # Start simulation
         fl.simulation.start_simulation(
             client_fn=client_fn,
-            num_clients=NUM_TRAIN_CLIENTS,
+            num_clients=server.strategy.num_train_clients,
             server=server,
             config=fl.server.ServerConfig(num_rounds=1000),
             client_resources=client_resources,

@@ -1,7 +1,9 @@
+from collections import OrderedDict
 import concurrent.futures
 import timeit
 from logging import DEBUG, INFO
-from typing import Dict, List, Optional, Tuple, Union
+import os
+from typing import Dict, List, Optional, Tuple, Union, Any, KeysView
 
 import flwr
 from flwr.common import (
@@ -14,6 +16,7 @@ from flwr.common import (
     Parameters,
     ReconnectIns,
     Scalar,
+    Metrics,
 )
 from flwr.common.logger import log
 from flwr.common.typing import GetParametersIns, GetPropertiesIns
@@ -21,9 +24,138 @@ from flwr.server.client_manager import ClientManager, SimpleClientManager
 from flwr.server.client_proxy import ClientProxy
 from flwr.server.history import History
 from flwr.server.strategy import FedAvg, Strategy
+import numpy as np
+import torch
 
 from PeFLL.models import CNNTarget
-from my_strategy import SaveModelStrategy
+
+
+def weighted_average(metrics: List[Tuple[int, Metrics]]) -> Metrics:
+    # Multiply accuracy of each client by number of examples used
+    examples = np.asarray([num_examples for num_examples, _ in metrics])
+    accuracies = np.asarray([m['accuracy'] for _, m in metrics])
+    # Aggregate and return custom metric (weighted average)
+    accuracy = np.sum(accuracies * examples) / np.sum(examples)
+    return {'accuracy': accuracy}
+
+
+class FlowerStrategy(flwr.server.strategy.FedAvg):
+    def __init__(
+            self,
+            num_train_clients: int,
+            state_dict_keys: KeysView,
+            mode: str,
+            init_round: int = 0,
+            eval_interval: int = 1,
+            *args, **kwargs
+    ):
+        super().__init__(
+            min_fit_clients=1,
+            min_evaluate_clients=1,
+            accept_failures=False,
+            evaluate_metrics_aggregation_fn=weighted_average,
+            *args,
+            **kwargs
+        )
+
+        self.num_train_clients: int = num_train_clients
+        self.state_dict_keys: KeysView = state_dict_keys
+        self.mode: str = mode
+        self.init_round: int = init_round
+        self.eval_interval: int = eval_interval
+
+    def initialize_parameters(self, client_manager: ClientManager) -> Optional[Parameters]:
+        parameters = super().initialize_parameters(client_manager)
+        if parameters is None and self.init_round:
+            # TODO
+            state_dict = torch.load(os.path.join('output', 'bak', f'model_round_{self.init_round}.pth'))
+            parameters = flwr.common.ndarrays_to_parameters(list(state_dict.values()))
+        return parameters
+
+    def configure_cid(self, client_config_pairs: List[Tuple[ClientProxy, Any]], client_manager: ClientManager,
+                      mode: str) -> List[int]:
+        if mode == 'multiplex':
+            cids = np.random.choice(np.arange(self.num_train_clients), len(client_config_pairs), replace=False).tolist()
+        elif mode == 'simulated':
+            cids = [int(client.cid) for client, _ in client_config_pairs]
+        elif mode == 'distributed':
+            all_cids: List[str] = list(client_manager.all().keys())
+            cids = [all_cids.index(client.cid) for client, _ in client_config_pairs]
+        else:
+            cids = None
+        print('XXX', cids)
+        return cids
+
+    def configure_fit(self, server_round: int, parameters: Parameters, client_manager: ClientManager) -> List[
+        Tuple[ClientProxy, FitIns]]:
+        client_config_pairs = super().configure_fit(server_round, parameters, client_manager)
+
+        # TODO
+        optimizer_config = {
+            'lr': 2e-3,
+            'momentum': .9,
+            'weight_decay': 5e-5,
+        }
+
+        client_config_pairs_updated: List[Tuple[ClientProxy, FitIns]] = []
+        cids = self.configure_cid(client_config_pairs, client_manager, self.mode)
+        for i, (client, fit_ins) in enumerate(client_config_pairs):
+            config = {
+                **fit_ins.config,
+                'cid': cids[i],
+                **optimizer_config,
+            }
+            client_config_pairs_updated.append((client, FitIns(fit_ins.parameters, config)))
+        return client_config_pairs_updated
+
+    def configure_evaluate(self, server_round: int, parameters: Parameters, client_manager: ClientManager) -> List[
+        Tuple[ClientProxy, EvaluateIns]]:
+        client_config_pairs = super().configure_evaluate(server_round, parameters, client_manager)
+        client_config_pairs_updated: List[Tuple[ClientProxy, EvaluateIns]] = []
+        cids = self.configure_cid(client_config_pairs, client_manager, self.mode)
+        for i, (client, evaluate_ins) in enumerate(client_config_pairs):
+            config = {
+                **evaluate_ins.config,
+                'cid': cids[i],
+            }
+            client_config_pairs_updated.append((client, EvaluateIns(evaluate_ins.parameters, config)))
+        return client_config_pairs_updated
+
+    def aggregate_fit(
+        self,
+        server_round: int,
+        results: List[Tuple[flwr.server.client_proxy.ClientProxy, flwr.common.FitRes]],
+        failures: List[Union[Tuple[ClientProxy, FitRes], BaseException]],
+    ) -> Tuple[Optional[Parameters], Dict[str, Scalar]]:
+        """Aggregate model weights using weighted average and store checkpoint"""
+        # Call aggregate_fit from base class (FedAvg) to aggregate parameters and metrics
+        aggregated_parameters, aggregated_metrics = super().aggregate_fit(server_round, results, failures)
+
+        if aggregated_parameters is not None and server_round % self.eval_interval == 0:
+            print(f"Saving round {server_round} aggregated_parameters...")
+
+            # Convert `Parameters` to `List[np.ndarray]`
+            aggregated_ndarrays: List[np.ndarray] = flwr.common.parameters_to_ndarrays(aggregated_parameters)
+
+            # Convert `List[np.ndarray]` to PyTorch`state_dict`
+            params_dict = zip(self.state_dict_keys, aggregated_ndarrays)
+            state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
+
+            # Save the model
+            # TODO
+            torch.save(state_dict, os.path.join('output', f"model_round_{server_round}.pth"))
+
+        return aggregated_parameters, aggregated_metrics
+
+    def aggregate_evaluate(self, server_round: int, results: List[Tuple[ClientProxy, EvaluateRes]],
+                           failures: List[Union[Tuple[ClientProxy, EvaluateRes], BaseException]]) -> Tuple[
+        Optional[float], Dict[str, Scalar]]:
+        loss_aggregated, metrics_aggregated = super().aggregate_evaluate(server_round, results, failures)
+
+        print(f"evaluation accuracy: {metrics_aggregated['accuracy']}")
+
+        return loss_aggregated, metrics_aggregated
+
 
 FitResultsAndFailures = Tuple[
     List[Tuple[ClientProxy, FitRes]],
@@ -39,13 +171,10 @@ ReconnectResultsAndFailures = Tuple[
 ]
 
 
-class MyServer(flwr.server.Server):
-    def __init__(self, client_manager: ClientManager, strategy: Optional[Strategy] = None,
-                 init_round: int = 0, eval_interval: int = 1, num_train_clients: int = 9):
+class FlowerServer(flwr.server.Server):
+    def __init__(self, client_manager: ClientManager, strategy: FlowerStrategy):
         super().__init__(client_manager=client_manager, strategy=strategy)
-        self.init_round: int = init_round
-        self.eval_interval: int = eval_interval
-        self.num_train_clients: int = num_train_clients
+        self.strategy: FlowerStrategy = self.strategy
 
     def fit(self, num_rounds: int, timeout: Optional[float]) -> History:
         """Run federated averaging for a number of rounds."""
@@ -73,7 +202,7 @@ class MyServer(flwr.server.Server):
             # TODO
             config = {
                 'device': 'cpu',
-                'num_train_clients': self.num_train_clients,
+                'num_train_clients': self.strategy.num_train_clients,
             }
             _ = client.get_properties(ins=GetPropertiesIns(config), timeout=None)
 
@@ -81,7 +210,7 @@ class MyServer(flwr.server.Server):
         log(INFO, "FL starting")
         start_time = timeit.default_timer()
 
-        for current_round in range(self.init_round, self.init_round + num_rounds):
+        for current_round in range(1 + self.strategy.init_round, 1 + self.strategy.init_round + num_rounds):
             # Train model and replace previous global model
             res_fit = self.fit_round(
                 server_round=current_round,
@@ -112,7 +241,7 @@ class MyServer(flwr.server.Server):
                     server_round=current_round, metrics=metrics_cen
                 )
 
-            if current_round % self.eval_interval:
+            if current_round % self.strategy.eval_interval:
                 continue
 
             # Evaluate model on a sample of available clients
@@ -134,41 +263,45 @@ class MyServer(flwr.server.Server):
         return history
 
 
-def make_server():
-    NUM_CLIENTS = 100
-    NUM_TRAIN_CLIENTS = int(NUM_CLIENTS * .9)
+def make_server(mode: str):
+    if mode in ['simulated', 'distributed']:
+        NUM_CLIENTS = 10
+        NUM_TRAIN_CLIENTS = int(NUM_CLIENTS * .9)
 
-    # Create FedAvg strategy
-    strategy = SaveModelStrategy(
-        fraction_fit=.1,  # Sample 100% of available clients for training
-        fraction_evaluate=1.,  # Sample 50% of available clients for evaluation
-        min_available_clients=NUM_TRAIN_CLIENTS,  # Wait until all 10 clients are available
-        state_dict_keys=CNNTarget().state_dict().keys(),
-        mode='distributed',
-    )
+        # Create FedAvg strategy
+        strategy = FlowerStrategy(
+            fraction_fit=.1,  # Sample 100% of available clients for training
+            fraction_evaluate=1.,  # Sample 50% of available clients for evaluation
+            min_available_clients=NUM_TRAIN_CLIENTS,  # Wait until all 10 clients are available
+            num_train_clients=NUM_TRAIN_CLIENTS,
+            state_dict_keys=CNNTarget().state_dict().keys(),
+            mode=mode,
+            init_round=0,
+            eval_interval=10,
+        )
+    elif mode in ['multiplex']:
+        NUM_TRAIN_CLIENTS = 20
 
-    server = MyServer(client_manager=SimpleClientManager(), strategy=strategy, init_round=0, eval_interval=10, num_train_clients=NUM_TRAIN_CLIENTS)
-    return server
+        # Create FedAvg strategy
+        strategy = FlowerStrategy(
+            fraction_fit=1.,  # Sample 100% of available clients for training
+            fraction_evaluate=1.,  # Sample 50% of available clients for evaluation
+            min_available_clients=int(NUM_TRAIN_CLIENTS * .1),  # Wait until all 10 clients are available
+            num_train_clients=NUM_TRAIN_CLIENTS,
+            state_dict_keys=CNNTarget().state_dict().keys(),
+            mode=mode,
+            init_round=0,
+            eval_interval=10,
+        )
+    else:
+        strategy = None
 
-
-def make_server2():
-    NUM_TRAIN_CLIENTS = 2
-
-    # Create FedAvg strategy
-    strategy = SaveModelStrategy(
-        fraction_fit=1.,  # Sample 100% of available clients for training
-        fraction_evaluate=1.,  # Sample 50% of available clients for evaluation
-        min_available_clients=NUM_TRAIN_CLIENTS,  # Wait until all 10 clients are available
-        state_dict_keys=CNNTarget().state_dict().keys(),
-        mode='multiplex',
-    )
-
-    server = MyServer(client_manager=SimpleClientManager(), strategy=strategy, init_round=0, eval_interval=10, num_train_clients=NUM_TRAIN_CLIENTS)
+    server = FlowerServer(client_manager=SimpleClientManager(), strategy=strategy)
     return server
 
 
 def main():
-    server = make_server2()
+    server = make_server(mode='multiplex')
     server_port = 18080
     flwr.server.start_server(
         server_address=f'0.0.0.0:{server_port}',
