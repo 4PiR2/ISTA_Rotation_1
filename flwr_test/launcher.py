@@ -42,8 +42,8 @@ def main():
             client_resources=client_resources,
         )
     else:
-        run(['pkill', 'flower_server'])
-        run(['pkill', 'flower_client'])
+        run(['pkill', '-9', '-f', 'python3 flower_server.py'])
+        run(['pkill', '-9', '-f', 'python3 flower_client.py'])
 
         p_server = run(['python3', 'flower_server.py'], blocking=False)
         time.sleep(20.)

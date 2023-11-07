@@ -1,6 +1,7 @@
 import argparse
 import gc
 from logging import DEBUG, INFO
+import traceback
 from typing import List, Dict, Tuple
 
 import flwr
@@ -45,7 +46,7 @@ class FlowerClient(flwr.client.NumPyClient):
 
     def set_parameters(self, parameters: List[np.ndarray], device: torch.device):
         state_dict = {k: torch.tensor(v, device=device) for k, v in zip(self.net.state_dict().keys(), parameters)}
-        self.net.load_state_dict(state_dict, strict=True)
+        self.net.load_state_dict(state_dict, strict=True, assign=True)
 
     def fit(self, parameters: List[np.ndarray], config: Config):
         """Train the network on the training set."""
@@ -119,6 +120,7 @@ def main():
             flwr.client.start_numpy_client(server_address=args.server_address, client=FlowerClient())
         except Exception as e:
             log(DEBUG, e)
+            log(DEBUG, traceback.format_exc())
         else:
             break
 

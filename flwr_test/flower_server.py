@@ -93,7 +93,8 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
     def initialize_parameters(self, client_manager: ClientManager) -> Optional[Parameters]:
         parameters = super().initialize_parameters(client_manager)
         if parameters is None and self.init_round:
-            state_dict = torch.load(os.path.join('outputs', 'checkpoints', f'model_round_{self.init_round}.pth'))
+            state_dict = torch.load(os.path.join('outputs', 'checkpoints', f'model_round_{self.init_round}.pth'),
+                                    map_location=torch.device('cpu'))
             parameters = flwr.common.ndarrays_to_parameters(list(state_dict.values()))
         return parameters
 
