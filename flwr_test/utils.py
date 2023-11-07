@@ -29,5 +29,5 @@ def run(cmd: List[str], cwd: Optional[str] = None, env=None, shell=False, blocki
         if rc is not None:
             break
     print('EXIT CODE:', rc)
-    assert rc == 0
+    # assert rc == 0
     return rc, ''.join(lines), ''.join(lines_out), ''.join(lines_err)

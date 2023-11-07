@@ -1,4 +1,5 @@
-import os.path
+import os
+import time
 
 import flwr
 import torch
@@ -41,7 +42,11 @@ def main():
             client_resources=client_resources,
         )
     else:
+        run(['pkill', 'flower_server'])
+        run(['pkill', 'flower_client'])
+
         p_server = run(['python3', 'flower_server.py'], blocking=False)
+        time.sleep(20.)
         # TODO
         min_available_clients = 9
         p_clients = [run(['python3', 'flower_client.py'], blocking=False) for _ in range(min_available_clients)]

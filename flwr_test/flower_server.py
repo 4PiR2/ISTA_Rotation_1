@@ -1,9 +1,7 @@
-from collections import OrderedDict
-import concurrent.futures
 import timeit
 from logging import DEBUG, INFO
 import os
-from typing import Dict, List, Optional, Tuple, Union, Any, KeysView
+from typing import Any, Dict, KeysView, List, Optional, Tuple, Union
 
 import flwr
 from flwr.common import (
@@ -23,7 +21,6 @@ from flwr.common.typing import GetParametersIns, GetPropertiesIns
 from flwr.server.client_manager import ClientManager, SimpleClientManager
 from flwr.server.client_proxy import ClientProxy
 from flwr.server.history import History
-from flwr.server.strategy import FedAvg, Strategy
 import numpy as np
 import torch
 
@@ -31,12 +28,15 @@ from PeFLL.models import CNNTarget
 
 
 def weighted_average(metrics: List[Tuple[int, Metrics]]) -> Metrics:
-    # Multiply accuracy of each client by number of examples used
-    examples = np.asarray([num_examples for num_examples, _ in metrics])
-    accuracies = np.asarray([m['accuracy'] for _, m in metrics])
     # Aggregate and return custom metric (weighted average)
-    accuracy = np.sum(accuracies * examples) / np.sum(examples)
-    return {'accuracy': accuracy}
+    if len(metrics) <= 0:
+        return {}
+    weights = np.asarray([num_examples for num_examples, _ in metrics], dtype=float)
+    weights /= np.sum(weights)
+    keys = metrics[0][1].keys()
+    metrics_mat = np.asarray([[m[k] for k in keys] for _, m in metrics], dtype=float)
+    avg_metrics = weights @ metrics_mat
+    return {k: float(v) for k, v in zip(keys, avg_metrics)}
 
 
 class FlowerStrategy(flwr.server.strategy.FedAvg):
@@ -50,17 +50,27 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
             optimizer_inner_lr: float = 2e-3,
             optimizer_inner_momentum: float = .9,
             optimizer_inner_weight_decay: float = 5e-5,
+            client_data_seed: int = 42,
+            client_data_data_name: str = 'cifar10',
+            client_data_data_path: str = './dataset',
+            client_data_num_clients: int = 100,
+            client_data_batch_size: int = 32,
+            client_data_partition_type: str = 'by_class',
+            client_data_classes_per_user: int = 2,
+            client_data_alpha_train: Optional[float] = None,
+            client_data_alpha_test: Optional[float] = None,
+            client_data_embedding_dir_path: Optional[str] = None,
             *args, **kwargs
     ):
         super().__init__(
             min_fit_clients=1,
             min_evaluate_clients=1,
             accept_failures=False,
+            fit_metrics_aggregation_fn=weighted_average,
             evaluate_metrics_aggregation_fn=weighted_average,
             *args,
             **kwargs
         )
-
         self.num_train_clients: int = num_train_clients
         self.state_dict_keys: KeysView = state_dict_keys
         self.mode: str = mode
@@ -69,6 +79,16 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
         self.optimizer_inner_lr: float = optimizer_inner_lr
         self.optimizer_inner_momentum: float = optimizer_inner_momentum
         self.optimizer_inner_weight_decay: float = optimizer_inner_weight_decay
+        self.client_data_seed: int = client_data_seed
+        self.client_data_data_name: str = client_data_data_name
+        self.client_data_data_path: str = client_data_data_path
+        self.client_data_num_clients: int = client_data_num_clients
+        self.client_data_batch_size: int = client_data_batch_size
+        self.client_data_partition_type: str = client_data_partition_type
+        self.client_data_classes_per_user: int = client_data_classes_per_user
+        self.client_data_alpha_train: Optional[float] = client_data_alpha_train
+        self.client_data_alpha_test: Optional[float] = client_data_alpha_test
+        self.client_data_embedding_dir_path: Optional[str] = client_data_embedding_dir_path
 
     def initialize_parameters(self, client_manager: ClientManager) -> Optional[Parameters]:
         parameters = super().initialize_parameters(client_manager)
@@ -102,10 +122,14 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
 
         client_config_pairs_updated: List[Tuple[ClientProxy, FitIns]] = []
         cids = self.configure_cid(client_config_pairs, client_manager, self.mode)
+        num_gpus = torch.cuda.device_count()
         for i, (client, fit_ins) in enumerate(client_config_pairs):
             config = {
                 **fit_ins.config,
                 'cid': cids[i],
+                'device': f'cuda:{i % num_gpus}' if num_gpus else 'cpu',
+                'num_epochs': 1,
+                'verbose': False,
                 **optimizer_config,
             }
             client_config_pairs_updated.append((client, FitIns(fit_ins.parameters, config)))
@@ -116,10 +140,12 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
         client_config_pairs = super().configure_evaluate(server_round, parameters, client_manager)
         client_config_pairs_updated: List[Tuple[ClientProxy, EvaluateIns]] = []
         cids = self.configure_cid(client_config_pairs, client_manager, self.mode)
+        num_gpus = torch.cuda.device_count()
         for i, (client, evaluate_ins) in enumerate(client_config_pairs):
             config = {
                 **evaluate_ins.config,
                 'cid': cids[i],
+                'device': f'cuda:{i % num_gpus}' if num_gpus else 'cpu',
             }
             client_config_pairs_updated.append((client, EvaluateIns(evaluate_ins.parameters, config)))
         return client_config_pairs_updated
@@ -132,31 +158,26 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
     ) -> Tuple[Optional[Parameters], Dict[str, Scalar]]:
         """Aggregate model weights using weighted average and store checkpoint"""
         # Call aggregate_fit from base class (FedAvg) to aggregate parameters and metrics
-        aggregated_parameters, aggregated_metrics = super().aggregate_fit(server_round, results, failures)
+        parameters_aggregated, metrics_aggregated = super().aggregate_fit(server_round, results, failures)
+        log(INFO, f"training accuracy: {metrics_aggregated['accuracy']}")
 
-        if aggregated_parameters is not None and server_round % self.eval_interval == 0:
-            print(f"Saving round {server_round} aggregated_parameters...")
-
+        if parameters_aggregated is not None and server_round % self.eval_interval == 0:
+            log(INFO, f'Saving round {server_round} aggregated_parameters...')
             # Convert `Parameters` to `List[np.ndarray]`
-            aggregated_ndarrays: List[np.ndarray] = flwr.common.parameters_to_ndarrays(aggregated_parameters)
-
+            aggregated_ndarrays: List[np.ndarray] = flwr.common.parameters_to_ndarrays(parameters_aggregated)
             # Convert `List[np.ndarray]` to PyTorch`state_dict`
-            params_dict = zip(self.state_dict_keys, aggregated_ndarrays)
-            state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
-
+            state_dict = {k: torch.tensor(v) for k, v in zip(self.state_dict_keys, aggregated_ndarrays)}
             # Save the model
             os.makedirs(os.path.join('outputs', 'checkpoints'), exist_ok=True)
             torch.save(state_dict, os.path.join('outputs', 'checkpoints', f'model_round_{server_round}.pth'))
 
-        return aggregated_parameters, aggregated_metrics
+        return parameters_aggregated, metrics_aggregated
 
     def aggregate_evaluate(self, server_round: int, results: List[Tuple[ClientProxy, EvaluateRes]],
                            failures: List[Union[Tuple[ClientProxy, EvaluateRes], BaseException]]) -> Tuple[
         Optional[float], Dict[str, Scalar]]:
         loss_aggregated, metrics_aggregated = super().aggregate_evaluate(server_round, results, failures)
-
-        print(f"evaluation accuracy: {metrics_aggregated['accuracy']}")
-
+        log(INFO, f"evaluation accuracy: {metrics_aggregated['accuracy']}")
         return loss_aggregated, metrics_aggregated
 
 
@@ -178,6 +199,26 @@ class FlowerServer(flwr.server.Server):
     def __init__(self, client_manager: ClientManager, strategy: FlowerStrategy):
         super().__init__(client_manager=client_manager, strategy=strategy)
         self.strategy: FlowerStrategy = self.strategy
+
+    def get_client_properties(self):
+        for i, (cid, client) in enumerate(self._client_manager.all().items()):
+            config = {
+                'num_train_clients': self.strategy.num_train_clients,
+                'seed': self.strategy.client_data_seed,
+                'data_name': self.strategy.client_data_data_name,
+                'data_path': self.strategy.client_data_data_path,
+                'num_clients': self.strategy.client_data_num_clients,
+                'batch_size': self.strategy.client_data_batch_size,
+                'partition_type': self.strategy.client_data_partition_type,
+                'classes_per_user': self.strategy.client_data_classes_per_user,
+            }
+            if self.strategy.client_data_alpha_train is not None:
+                config['alpha_train'] = self.strategy.client_data_alpha_train
+            if self.strategy.client_data_alpha_test is not None:
+                config['alpha_test'] = self.strategy.client_data_alpha_test
+            if self.strategy.client_data_embedding_dir_path is not None:
+                config['embedding_dir_path'] = self.strategy.client_data_embedding_dir_path
+            _ = client.get_properties(ins=GetPropertiesIns(config), timeout=None)
 
     def fit(self, num_rounds: int, timeout: Optional[float]) -> History:
         """Run federated averaging for a number of rounds."""
@@ -201,13 +242,7 @@ class FlowerServer(flwr.server.Server):
             history.add_loss_centralized(server_round=0, loss=res[0])
             history.add_metrics_centralized(server_round=0, metrics=res[1])
 
-        for i, (cid, client) in enumerate(self._client_manager.all().items()):
-            num_gpus = torch.cuda.device_count()
-            config = {
-                'device': f'cuda:{i % num_gpus}' if num_gpus else 'cpu',
-                'num_train_clients': self.strategy.num_train_clients,
-            }
-            _ = client.get_properties(ins=GetPropertiesIns(config), timeout=None)
+        self.get_client_properties()
 
         # Run federated learning for num_rounds
         log(INFO, "FL starting")
@@ -267,10 +302,10 @@ class FlowerServer(flwr.server.Server):
 
 
 def make_server(mode: str):
-    if mode in ['simulated', 'distributed']:
-        NUM_CLIENTS = 100
-        NUM_TRAIN_CLIENTS = int(NUM_CLIENTS * .9)
+    NUM_CLIENTS = 100
+    NUM_TRAIN_CLIENTS = int(NUM_CLIENTS * .9)
 
+    if mode in ['simulated', 'distributed']:
         # Create FedAvg strategy
         strategy = FlowerStrategy(
             fraction_fit=.1,  # Sample 100% of available clients for training
@@ -283,8 +318,6 @@ def make_server(mode: str):
             eval_interval=10,
         )
     elif mode in ['multiplex']:
-        NUM_TRAIN_CLIENTS = 90
-
         # Create FedAvg strategy
         strategy = FlowerStrategy(
             fraction_fit=1.,  # Sample 100% of available clients for training
@@ -307,6 +340,21 @@ def make_server(mode: str):
 
 
 def main():
+    with open('wandb_token.txt', 'r') as f:
+        wandb_token = f.readline().strip()
+    import wandb
+    wandb_login = wandb.login(key=wandb_token)
+    if wandb_login:
+        wandb.init(
+            # Set the project where this run will be logged
+            project="test",
+            # We pass a run name (otherwise it’ll be randomly assigned, like sunshine-lollypop-10)
+            name=f"experiment_{15}",
+            # Track hyperparameters and run metadata
+            config={
+                "hello": 2e-2,
+            })
+
     server = make_server(mode='multiplex')
     server_port = 18080
     flwr.server.start_server(
@@ -314,6 +362,10 @@ def main():
         server=server,
         config=flwr.server.ServerConfig(num_rounds=1000),
     )
+
+    if wandb_login:
+        # Mark the run as finished
+        wandb.finish()
 
 
 if __name__ == '__main__':
