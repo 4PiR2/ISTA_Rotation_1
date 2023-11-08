@@ -4,6 +4,7 @@ import time
 
 import flwr
 import torch
+import wandb
 
 from flower_client import FlowerClient
 from flower_server import make_server
@@ -13,8 +14,21 @@ from utils import run
 
 def main():
     args = parse_args()
-    mode = args.mode
+    with open('wandb_token.txt', 'r') as f:
+        wandb_token = f.readline().strip()
+    wandb_login = wandb.login(key=wandb_token)
+    if wandb_login:
+        wandb.init(
+            # Set the project where this run will be logged
+            project='test',
+            # We pass a run name (otherwise it’ll be randomly assigned, like sunshine-lollypop-10)
+            name=f'experiment_{18}',
+            # Track hyperparameters and run metadata
+            config={
+                **vars(args),
+            })
 
+    mode = args.mode
     if mode == 'simulated':
         server = make_server(args)
         config = {
@@ -88,8 +102,12 @@ def main():
                 break
         for log_file in log_files:
             log_file.close()
+
     print('END', flush=True)
+    if wandb.run is not None:
+        wandb.finish()  # Mark the run as finished
 
 
 if __name__ == '__main__':
+    os.environ['CUDA_VISIBLE_DEVICES'] = ''
     main()

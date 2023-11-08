@@ -355,19 +355,19 @@ def make_server(args: argparse.Namespace):
 
 def main():
     args = parse_args()
-    with open('wandb_token.txt', 'r') as f:
-        wandb_token = f.readline().strip()
-    wandb_login = wandb.login(key=wandb_token)
-    if wandb_login:
-        wandb.init(
-            # Set the project where this run will be logged
-            project='test',
-            # We pass a run name (otherwise it’ll be randomly assigned, like sunshine-lollypop-10)
-            name=f'experiment_{18}',
-            # Track hyperparameters and run metadata
-            config={
-                **vars(args),
-            })
+    # with open('wandb_token.txt', 'r') as f:
+    #     wandb_token = f.readline().strip()
+    # wandb_login = wandb.login(key=wandb_token)
+    # if wandb_login:
+    #     wandb.init(
+    #         # Set the project where this run will be logged
+    #         project='test',
+    #         # We pass a run name (otherwise it’ll be randomly assigned, like sunshine-lollypop-10)
+    #         name=f'experiment_{18}',
+    #         # Track hyperparameters and run metadata
+    #         config={
+    #             **vars(args),
+    #         })
 
     server = make_server(args)
 
@@ -377,8 +377,8 @@ def main():
         config=flwr.server.ServerConfig(num_rounds=args.num_rounds),
     )
 
-    if wandb.run is not None:
-        wandb.finish()  # Mark the run as finished
+    # if wandb.run is not None:
+    #     wandb.finish()  # Mark the run as finished
 
 
 if __name__ == '__main__':
