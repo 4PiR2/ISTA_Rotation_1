@@ -44,14 +44,15 @@ class FlowerClient(flwr.client.NumPyClient):
     def get_parameters(self, config: Config):
         return [val.detach().cpu().numpy() for _, val in self.net.state_dict().items()]
 
-    def set_parameters(self, parameters: List[np.ndarray], device: torch.device):
-        state_dict = {k: torch.tensor(v, device=device) for k, v in zip(self.net.state_dict().keys(), parameters)}
-        self.net.load_state_dict(state_dict, strict=True, assign=True)
+    def set_parameters(self, parameters: List[np.ndarray]):
+        state_dict = {k: torch.tensor(v) for k, v in zip(self.net.state_dict().keys(), parameters)}
+        self.net.load_state_dict(state_dict, strict=True)
 
     def fit(self, parameters: List[np.ndarray], config: Config):
         """Train the network on the training set."""
         device = torch.device(config['device'])
-        self.set_parameters(parameters, device)
+        self.net = self.net.to(device)
+        self.set_parameters(parameters)
         trainloader = self.trainloaders[int(config['cid'])]
         criterion = torch.nn.CrossEntropyLoss()
         optimizer = torch.optim.SGD(self.net.parameters(),
@@ -91,7 +92,8 @@ class FlowerClient(flwr.client.NumPyClient):
     def evaluate(self, parameters: List[np.ndarray], config: Config):
         """Evaluate the network on the entire test set."""
         device = torch.device(config['device'])
-        self.set_parameters(parameters, device)
+        self.net = self.net.to(device)
+        self.set_parameters(parameters)
         valloader = self.valloaders[int(config['cid'])]
         criterion = torch.nn.CrossEntropyLoss()
         correct, loss = 0, 0.
