@@ -15,6 +15,8 @@ from PeFLL.dataset import gen_random_loaders
 from PeFLL.models import CNNTarget
 from PeFLL.utils import set_seed
 
+from parse_args import parse_args
+
 
 class FlowerClient(flwr.client.NumPyClient):
     def __init__(self, *args, **kwargs):
@@ -113,9 +115,7 @@ class FlowerClient(flwr.client.NumPyClient):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Flower Client Arguments')
-    parser.add_argument('--server-address', type=str, default=f'127.0.0.1:{18080}')
-    args = parser.parse_args()
+    args = parse_args()
 
     while True:
         try:

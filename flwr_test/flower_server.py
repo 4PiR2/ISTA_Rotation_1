@@ -28,6 +28,8 @@ import wandb
 
 from PeFLL.models import CNNTarget
 
+from parse_args import parse_args
+
 
 def weighted_average(metrics: List[Tuple[int, Metrics]]) -> Metrics:
     # Aggregate and return custom metric (weighted average)
@@ -164,7 +166,7 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
         parameters_aggregated, metrics_aggregated = super().aggregate_fit(server_round, results, failures)
         log(INFO, f"training accuracy: {metrics_aggregated['accuracy']}")
         if wandb.run is not None:
-            wandb.log({'train': {'acc': metrics_aggregated['accuracy']}}, commit=False, step=server_round)
+            wandb.log({'train': {'accuracy': metrics_aggregated['accuracy']}}, commit=False, step=server_round)
 
         if parameters_aggregated is not None and server_round % self.eval_interval == 0:
             log(INFO, f'Saving round {server_round} aggregated_parameters...')
@@ -184,7 +186,7 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
         loss_aggregated, metrics_aggregated = super().aggregate_evaluate(server_round, results, failures)
         log(INFO, f"evaluation accuracy: {metrics_aggregated['accuracy']}")
         if wandb.run is not None:
-            wandb.log({'val': {'acc': metrics_aggregated['accuracy']}}, commit=True, step=server_round)
+            wandb.log({'val': {'accuracy': metrics_aggregated['accuracy']}}, commit=True, step=server_round)
         return loss_aggregated, metrics_aggregated
 
 
@@ -351,33 +353,8 @@ def make_server(args: argparse.Namespace):
     return server
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description='Flower Server Arguments')
-    parser.add_argument('--server-address', type=str, default=f'127.0.0.1:{18080}')
-    parser.add_argument('--mode', type=str, default=f'multiplex')
-    parser.add_argument('--num-train-clients', type=int, default=int(100 * .9))
-    parser.add_argument('--init-round', type=int, default=0)
-    parser.add_argument('--eval-interval', type=int, default=10)
-    parser.add_argument('--optimizer-inner-lr', type=float, default=2e-3)
-    parser.add_argument('--optimizer-inner-momentum', type=float, default=.9)
-    parser.add_argument('--optimizer-inner-weight-decay', type=float, default=5e-5)
-    parser.add_argument('--client-data-seed', type=int, default=42)
-    parser.add_argument('--client-data-data-name', type=str, default='cifar10')
-    parser.add_argument('--client-data-data-path', type=str, default='./dataset')
-    parser.add_argument('--client-data-num-clients', type=int, default=100)
-    parser.add_argument('--client-data-batch-size', type=int, default=32)
-    parser.add_argument('--client-data-partition-type', type=str, default='by_class')
-    parser.add_argument('--client-data-classes-per-user', type=int, default=2)
-    parser.add_argument('--client-data-alpha-train', type=float, default=None)
-    parser.add_argument('--client-data-alpha-test', type=float, default=None)
-    parser.add_argument('--client-data-embedding-dir-path', type=str, default=None)
-    args = parser.parse_args()
-    return args
-
-
 def main():
     args = parse_args()
-
     with open('wandb_token.txt', 'r') as f:
         wandb_token = f.readline().strip()
     wandb_login = wandb.login(key=wandb_token)
@@ -386,18 +363,18 @@ def main():
             # Set the project where this run will be logged
             project='test',
             # We pass a run name (otherwise it’ll be randomly assigned, like sunshine-lollypop-10)
-            name=f'experiment_{17}',
+            name=f'experiment_{18}',
             # Track hyperparameters and run metadata
             config={
-                "hello": 1.234,
+                **vars(args),
             })
 
     server = make_server(args)
 
     flwr.server.start_server(
-        server_address=args.server_address,
+        server_address=f"0.0.0.0:{args.server_address.split(':')[-1]}",
         server=server,
-        config=flwr.server.ServerConfig(num_rounds=1000),
+        config=flwr.server.ServerConfig(num_rounds=args.num_rounds),
     )
 
     if wandb.run is not None:
