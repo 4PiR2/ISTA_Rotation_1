@@ -46,7 +46,7 @@ def main():
         run(['pkill', '-9', '-f', 'python3 flower_client.py'])
 
         p_server = run(['python3', 'flower_server.py'], blocking=False)
-        time.sleep(20.)
+        time.sleep(10.)
         # TODO
         min_available_clients = 9
         p_clients = [run(['python3', 'flower_client.py'], blocking=False) for _ in range(min_available_clients)]
@@ -59,11 +59,11 @@ def main():
                 while line_out := p.stdout.readline():
                     log_files[i].write(line_out)
                     log_files[i].flush()
-                    print(f'[C{i}]\t', line_out, end='')
+                    print(f'[C{i}]\t', line_out, end='', flush=True)
                 while line_err := p.stderr.readline():
                     log_files[i].write(line_err)
                     log_files[i].flush()
-                    print(f'[C{i}]\t', line_err, end='')
+                    print(f'[C{i}]\t', line_err, end='', flush=True)
             if None not in rcs:
                 break
         for log_file in log_files:

@@ -1,3 +1,4 @@
+import argparse
 import timeit
 from logging import DEBUG, INFO
 import os
@@ -47,7 +48,7 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
             state_dict_keys: KeysView,
             mode: str,
             init_round: int = 0,
-            eval_interval: int = 1,
+            eval_interval: int = 10,
             optimizer_inner_lr: float = 2e-3,
             optimizer_inner_momentum: float = .9,
             optimizer_inner_weight_decay: float = 5e-5,
@@ -64,8 +65,8 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
             *args, **kwargs
     ):
         super().__init__(
-            min_fit_clients=1,
-            min_evaluate_clients=1,
+            fraction_fit=1e-9,  # Sample % of available clients for training
+            fraction_evaluate=1e-9,  # Sample % of available clients for evaluation
             accept_failures=False,
             fit_metrics_aggregation_fn=weighted_average,
             evaluate_metrics_aggregation_fn=weighted_average,
@@ -162,7 +163,8 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
         # Call aggregate_fit from base class (FedAvg) to aggregate parameters and metrics
         parameters_aggregated, metrics_aggregated = super().aggregate_fit(server_round, results, failures)
         log(INFO, f"training accuracy: {metrics_aggregated['accuracy']}")
-        wandb.log({'train': {'acc': metrics_aggregated['accuracy']}}, commit=True, step=server_round)
+        if wandb.run is not None:
+            wandb.log({'train': {'acc': metrics_aggregated['accuracy']}}, commit=False, step=server_round)
 
         if parameters_aggregated is not None and server_round % self.eval_interval == 0:
             log(INFO, f'Saving round {server_round} aggregated_parameters...')
@@ -181,7 +183,8 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
         Optional[float], Dict[str, Scalar]]:
         loss_aggregated, metrics_aggregated = super().aggregate_evaluate(server_round, results, failures)
         log(INFO, f"evaluation accuracy: {metrics_aggregated['accuracy']}")
-        wandb.log({'val': {'acc': metrics_aggregated['accuracy']}}, commit=True, step=server_round)
+        if wandb.run is not None:
+            wandb.log({'val': {'acc': metrics_aggregated['accuracy']}}, commit=True, step=server_round)
         return loss_aggregated, metrics_aggregated
 
 
@@ -305,70 +308,100 @@ class FlowerServer(flwr.server.Server):
         return history
 
 
-def make_server(mode: str):
-    NUM_CLIENTS = 100
-    NUM_TRAIN_CLIENTS = int(NUM_CLIENTS * .9)
+def make_server(args: argparse.Namespace):
+    mode: str = args.mode
+    num_clients = args.client_data_num_clients
+    num_train_clients = int(num_clients * .9)
+    min_fit_clients = int(num_train_clients * .1)
+    min_evaluate_clients = min_fit_clients
 
     if mode in ['simulated', 'distributed']:
-        # Create FedAvg strategy
-        strategy = FlowerStrategy(
-            fraction_fit=.1,  # Sample 100% of available clients for training
-            fraction_evaluate=1.,  # Sample 50% of available clients for evaluation
-            min_available_clients=NUM_TRAIN_CLIENTS,  # Wait until all 10 clients are available
-            num_train_clients=NUM_TRAIN_CLIENTS,
-            state_dict_keys=CNNTarget().state_dict().keys(),
-            mode=mode,
-            init_round=0,
-            eval_interval=10,
-        )
+        min_available_clients = num_train_clients
     elif mode in ['multiplex']:
-        # Create FedAvg strategy
-        strategy = FlowerStrategy(
-            fraction_fit=1.,  # Sample 100% of available clients for training
-            fraction_evaluate=1.,  # Sample 50% of available clients for evaluation
-            min_available_clients=int(NUM_TRAIN_CLIENTS * .1),  # Wait until all 10 clients are available
-            num_train_clients=NUM_TRAIN_CLIENTS,
-            state_dict_keys=CNNTarget().state_dict().keys(),
-            mode=mode,
-            init_round=0,
-            eval_interval=10,
-            optimizer_inner_lr=2e-3,
-            optimizer_inner_momentum=.9,
-            optimizer_inner_weight_decay=5e-5,
-        )
+        min_available_clients = min_fit_clients
     else:
-        strategy = None
+        min_available_clients = int(1e9)
+
+    # Create strategy
+    strategy = FlowerStrategy(
+        min_fit_clients=min_fit_clients,
+        min_evaluate_clients=min_evaluate_clients,
+        min_available_clients=min_available_clients,  # Wait until all clients are available
+        num_train_clients=num_train_clients,
+        state_dict_keys=CNNTarget().state_dict().keys(),
+        mode=mode,
+        init_round=args.init_round,
+        eval_interval=args.eval_interval,
+        optimizer_inner_lr=args.optimizer_inner_lr,
+        optimizer_inner_momentum=args.optimizer_inner_momentum,
+        optimizer_inner_weight_decay=args.optimizer_inner_weight_decay,
+        client_data_seed=args.client_data_seed,
+        client_data_data_name=args.client_data_data_name,
+        client_data_data_path=args.client_data_data_path,
+        client_data_num_clients=num_clients,
+        client_data_batch_size=args.client_data_batch_size,
+        client_data_partition_type=args.client_data_partition_type,
+        client_data_classes_per_user=args.client_data_classes_per_user,
+        client_data_alpha_train=args.client_data_alpha_train,
+        client_data_alpha_test=args.client_data_alpha_test,
+        client_data_embedding_dir_path=args.client_data_embedding_dir_path,
+    )
 
     server = FlowerServer(client_manager=SimpleClientManager(), strategy=strategy)
     return server
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description='Flower Server Arguments')
+    parser.add_argument('--server-address', type=str, default=f'127.0.0.1:{18080}')
+    parser.add_argument('--mode', type=str, default=f'multiplex')
+    parser.add_argument('--num-train-clients', type=int, default=int(100 * .9))
+    parser.add_argument('--init-round', type=int, default=0)
+    parser.add_argument('--eval-interval', type=int, default=10)
+    parser.add_argument('--optimizer-inner-lr', type=float, default=2e-3)
+    parser.add_argument('--optimizer-inner-momentum', type=float, default=.9)
+    parser.add_argument('--optimizer-inner-weight-decay', type=float, default=5e-5)
+    parser.add_argument('--client-data-seed', type=int, default=42)
+    parser.add_argument('--client-data-data-name', type=str, default='cifar10')
+    parser.add_argument('--client-data-data-path', type=str, default='./dataset')
+    parser.add_argument('--client-data-num-clients', type=int, default=100)
+    parser.add_argument('--client-data-batch-size', type=int, default=32)
+    parser.add_argument('--client-data-partition-type', type=str, default='by_class')
+    parser.add_argument('--client-data-classes-per-user', type=int, default=2)
+    parser.add_argument('--client-data-alpha-train', type=float, default=None)
+    parser.add_argument('--client-data-alpha-test', type=float, default=None)
+    parser.add_argument('--client-data-embedding-dir-path', type=str, default=None)
+    args = parser.parse_args()
+    return args
+
+
 def main():
+    args = parse_args()
+
     with open('wandb_token.txt', 'r') as f:
         wandb_token = f.readline().strip()
     wandb_login = wandb.login(key=wandb_token)
     if wandb_login:
         wandb.init(
             # Set the project where this run will be logged
-            project="test",
+            project='test',
             # We pass a run name (otherwise it’ll be randomly assigned, like sunshine-lollypop-10)
-            name=f"experiment_{15}",
+            name=f'experiment_{17}',
             # Track hyperparameters and run metadata
             config={
-                "hello": 2e-2,
+                "hello": 1.234,
             })
 
-    server = make_server(mode='multiplex')
-    server_port = 18080
+    server = make_server(args)
+
     flwr.server.start_server(
-        server_address=f'0.0.0.0:{server_port}',
+        server_address=args.server_address,
         server=server,
         config=flwr.server.ServerConfig(num_rounds=1000),
     )
 
-    if wandb_login:
-        # Mark the run as finished
-        wandb.finish()
+    if wandb.run is not None:
+        wandb.finish()  # Mark the run as finished
 
 
 if __name__ == '__main__':
