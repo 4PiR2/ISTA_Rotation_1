@@ -13,13 +13,16 @@ from flwr.common import (
     EvaluateRes,
     FitIns,
     FitRes,
+    GetParametersIns,
+    GetParametersRes,
+    GetPropertiesIns,
+    GetPropertiesRes,
     Parameters,
     ReconnectIns,
     Scalar,
     Metrics,
 )
 from flwr.common.logger import log
-from flwr.common.typing import GetParametersIns, GetPropertiesIns
 from flwr.server.client_manager import ClientManager, SimpleClientManager
 from flwr.server.client_proxy import ClientProxy
 from flwr.server.history import History
@@ -31,18 +34,6 @@ from PeFLL.models import CNNTarget
 
 from parse_args import parse_args
 from utils import init_wandb, finish_wandb
-
-
-def weighted_average(metrics: List[Tuple[int, Metrics]]) -> Metrics:
-    # Aggregate and return custom metric (weighted average)
-    if len(metrics) <= 0:
-        return {}
-    weights = np.asarray([num_examples for num_examples, _ in metrics], dtype=float)
-    weights /= np.sum(weights)
-    keys = metrics[0][1].keys()
-    metrics_mat = np.asarray([[m[k] for k in keys] for _, m in metrics], dtype=float)
-    avg_metrics = weights @ metrics_mat
-    return {k: float(v) for k, v in zip(keys, avg_metrics)}
 
 
 class FlowerStrategy(flwr.server.strategy.FedAvg):
@@ -68,6 +59,17 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
             client_data_embedding_dir_path: Optional[str] = None,
             *args, **kwargs
     ):
+        def weighted_average(metrics: List[Tuple[int, Metrics]]) -> Metrics:
+            # Aggregate and return custom metric (weighted average)
+            if len(metrics) <= 0:
+                return {}
+            weights = np.asarray([num_examples for num_examples, _ in metrics], dtype=float)
+            weights /= np.sum(weights)
+            keys = metrics[0][1].keys()
+            metrics_mat = np.asarray([[m[k] for k in keys] for _, m in metrics], dtype=float)
+            avg_metrics = weights @ metrics_mat
+            return {k: float(v) for k, v in zip(keys, avg_metrics)}
+
         super().__init__(
             fraction_fit=1e-9,  # Sample % of available clients for training
             fraction_evaluate=1e-9,  # Sample % of available clients for evaluation
@@ -104,7 +106,7 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
             parameters = flwr.common.ndarrays_to_parameters(list(state_dict.values()))
         return parameters
 
-    def configure_common(self, client_config_pairs: List[Tuple[ClientProxy, Any]], client_manager: ClientManager) \
+    def _configure_common(self, client_config_pairs: List[Tuple[ClientProxy, Any]], client_manager: ClientManager) \
             -> List[Dict[str, Scalar]]:
         all_cids = sorted(list(client_manager.all().keys()))
 
@@ -133,6 +135,29 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
         ]
         return configs
 
+    def configure_get_properties(self, server_round: int, parameters: Parameters, client_manager: ClientManager) \
+            -> List[Tuple[ClientProxy, GetPropertiesIns]]:
+        client_config_pairs_updated: List[Tuple[ClientProxy, GetPropertiesIns]] = []
+        for i, (cid, client) in enumerate(client_manager.all().items()):
+            config = {
+                'num_train_clients': self.num_train_clients,
+                'seed': self.client_data_seed,
+                'data_name': self.client_data_data_name,
+                'data_path': self.client_data_data_path,
+                'num_clients': self.client_data_num_clients,
+                'batch_size': self.client_data_batch_size,
+                'partition_type': self.client_data_partition_type,
+                'classes_per_user': self.client_data_classes_per_user,
+            }
+            if self.client_data_alpha_train is not None:
+                config['alpha_train'] = self.client_data_alpha_train
+            if self.client_data_alpha_test is not None:
+                config['alpha_test'] = self.client_data_alpha_test
+            if self.client_data_embedding_dir_path is not None:
+                config['embedding_dir_path'] = self.client_data_embedding_dir_path
+            client_config_pairs_updated.append((client, GetPropertiesIns(config)))
+        return client_config_pairs_updated
+
     def configure_fit(self, server_round: int, parameters: Parameters, client_manager: ClientManager) -> List[
         Tuple[ClientProxy, FitIns]]:
         client_config_pairs = super().configure_fit(server_round, parameters, client_manager)
@@ -143,7 +168,7 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
             'weight_decay': self.optimizer_inner_weight_decay,
         }
 
-        common_configs = self.configure_common(client_config_pairs, client_manager)
+        common_configs = self._configure_common(client_config_pairs, client_manager)
         client_config_pairs_updated: List[Tuple[ClientProxy, FitIns]] = []
         for i, (client, fit_ins) in enumerate(client_config_pairs):
             config = {
@@ -159,7 +184,7 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
     def configure_evaluate(self, server_round: int, parameters: Parameters, client_manager: ClientManager) -> List[
         Tuple[ClientProxy, EvaluateIns]]:
         client_config_pairs = super().configure_evaluate(server_round, parameters, client_manager)
-        common_configs = self.configure_common(client_config_pairs, client_manager)
+        common_configs = self._configure_common(client_config_pairs, client_manager)
         client_config_pairs_updated: List[Tuple[ClientProxy, EvaluateIns]] = []
         for i, (client, evaluate_ins) in enumerate(client_config_pairs):
             config = {
@@ -168,6 +193,14 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
             }
             client_config_pairs_updated.append((client, EvaluateIns(evaluate_ins.parameters, config)))
         return client_config_pairs_updated
+
+    def aggregate_get_properties(
+        self,
+        server_round: int,
+        results: List[Tuple[flwr.server.client_proxy.ClientProxy, flwr.common.GetPropertiesRes]],
+        failures: List[Union[Tuple[ClientProxy, GetPropertiesRes], BaseException]],
+    ) -> Tuple[Optional[Any], Dict[str, Scalar]]:
+        return None, {}
 
     def aggregate_fit(
         self,
@@ -223,30 +256,10 @@ class FlowerServer(flwr.server.Server):
         super().__init__(client_manager=client_manager, strategy=strategy)
         self.strategy: FlowerStrategy = self.strategy
 
-    def get_client_properties(self):
-        for i, (cid, client) in enumerate(self._client_manager.all().items()):
-            config = {
-                'num_train_clients': self.strategy.num_train_clients,
-                'seed': self.strategy.client_data_seed,
-                'data_name': self.strategy.client_data_data_name,
-                'data_path': self.strategy.client_data_data_path,
-                'num_clients': self.strategy.client_data_num_clients,
-                'batch_size': self.strategy.client_data_batch_size,
-                'partition_type': self.strategy.client_data_partition_type,
-                'classes_per_user': self.strategy.client_data_classes_per_user,
-            }
-            if self.strategy.client_data_alpha_train is not None:
-                config['alpha_train'] = self.strategy.client_data_alpha_train
-            if self.strategy.client_data_alpha_test is not None:
-                config['alpha_test'] = self.strategy.client_data_alpha_test
-            if self.strategy.client_data_embedding_dir_path is not None:
-                config['embedding_dir_path'] = self.strategy.client_data_embedding_dir_path
-            _ = client.get_properties(ins=GetPropertiesIns(config), timeout=None)
-
-    def execute_round(self, client_execute_fn: Callable, client_instructions_fn: Callable, aggregate_fn: Callable,
-                      server_round: int, timeout: Optional[float]) -> Optional[
-        Tuple[Optional[Parameters], Dict[str, Scalar], FitResultsAndFailures]
-    ]:
+    def execute_round(
+            self, client_execute_fn: Callable, client_instructions_fn: Callable, aggregate_fn: Callable,
+            server_round: int, timeout: Optional[float]
+    ) -> Optional[Tuple[Optional[Parameters], Dict[str, Scalar], FitResultsAndFailures]]:
         """Perform a single round of communication."""
         # Get clients and their respective instructions from strategy
         client_instructions = client_instructions_fn(
@@ -255,9 +268,9 @@ class FlowerServer(flwr.server.Server):
             client_manager=self._client_manager,
         )
         if not client_instructions:
-            log(INFO, "do_round %s: no clients selected, cancel", server_round)
+            log(INFO, "execute_round %s: no clients selected, cancel", server_round)
             return None
-        log(DEBUG, "do_round %s: strategy sampled %s clients (out of %s)",
+        log(DEBUG, "execute_round %s: strategy sampled %s clients (out of %s)",
             server_round, len(client_instructions), self._client_manager.num_available())
         # Collect `execute` results from all clients participating in this round
         """Refine parameters concurrently on all selected clients."""
@@ -278,15 +291,17 @@ class FlowerServer(flwr.server.Server):
             failure = future.exception()
             if failure is not None:
                 failures.append(failure)
-            # Successfully received a result from a client
-            result: Tuple[ClientProxy, FitRes] = future.result()
-            _, res = result
-            # Check result status code
-            if res.status.code == Code.OK:
-                results.append(result)
-            # Not successful, client returned a result where the status code is not OK
-            failures.append(result)
-        log(DEBUG, "do_round %s received %s results and %s failures", server_round, len(results), len(failures))
+            else:
+                # Successfully received a result from a client
+                result: Tuple[ClientProxy, FitRes] = future.result()
+                _, res = result
+                # Check result status code
+                if res.status.code == Code.OK:
+                    results.append(result)
+                else:
+                    # Not successful, client returned a result where the status code is not OK
+                    failures.append(result)
+        log(DEBUG, "execute_round %s received %s results and %s failures", server_round, len(results), len(failures))
         # Aggregate training results
         aggregated_result: Tuple[Optional[Parameters], Dict[str, Scalar]] \
             = aggregate_fn(server_round, results, failures)
@@ -315,12 +330,16 @@ class FlowerServer(flwr.server.Server):
             history.add_loss_centralized(server_round=0, loss=res[0])
             history.add_metrics_centralized(server_round=0, metrics=res[1])
 
-        log(INFO, "Initializing clients")
-        self.get_client_properties()
-
         # Run federated learning for num_rounds
         log(INFO, "FL starting")
         start_time = timeit.default_timer()
+
+        def get_properties_client_fn(
+                client: ClientProxy, ins: GetPropertiesIns, timeout: Optional[float]
+        ) -> Tuple[ClientProxy, GetPropertiesRes]:
+            """Get properties on a single client."""
+            get_properties_res = client.get_properties(ins, timeout=timeout)
+            return client, get_properties_res
 
         def fit_client_fn(
                 client: ClientProxy, ins: FitIns, timeout: Optional[float]
@@ -332,21 +351,21 @@ class FlowerServer(flwr.server.Server):
         def evaluate_client_fn(
                 client: ClientProxy, ins: EvaluateIns, timeout: Optional[float]
         ) -> Tuple[ClientProxy, EvaluateRes]:
-            """Refine parameters on a single client."""
+            """Evaluate parameters on a single client."""
             evaluate_res = client.evaluate(ins, timeout=timeout)
             return client, evaluate_res
 
+        log(INFO, "Initializing clients")
+        res_get_properties = self.execute_round(
+            get_properties_client_fn, self.strategy.configure_get_properties, self.strategy.aggregate_get_properties,
+            0, timeout
+        )
+
         for current_round in range(1 + self.strategy.init_round, 1 + self.strategy.init_round + num_rounds):
             # Train model and replace previous global model
-            if False:
-                res_fit = self.fit_round(
-                    server_round=current_round,
-                    timeout=timeout,
-                )
-            else:
-                res_fit = self.execute_round(
-                    fit_client_fn, self.strategy.configure_fit, self.strategy.aggregate_fit, current_round, timeout
-                )
+            res_fit = self.execute_round(
+                fit_client_fn, self.strategy.configure_fit, self.strategy.aggregate_fit, current_round, timeout
+            )
 
             if res_fit is not None:
                 parameters_prime, fit_metrics, _ = res_fit  # fit_metrics_aggregated
@@ -377,15 +396,9 @@ class FlowerServer(flwr.server.Server):
                 )
 
             # Evaluate model on a sample of available clients
-            if False:
-                res_fed = self.evaluate_round(
-                    server_round=current_round,
-                    timeout=timeout,
-                )
-            else:
-                res_fed = self.execute_round(
-                    evaluate_client_fn, self.strategy.configure_evaluate, self.strategy.aggregate_evaluate, current_round, timeout
-                )
+            res_fed = self.execute_round(
+                evaluate_client_fn, self.strategy.configure_evaluate, self.strategy.aggregate_evaluate, current_round, timeout
+            )
 
             if res_fed is not None:
                 loss_fed, evaluate_metrics_fed, _ = res_fed
@@ -408,6 +421,7 @@ def make_server(args: argparse.Namespace):
     mode: str = args.mode
     num_clients = args.client_data_num_clients
     num_train_clients = int(num_clients * .9)
+    # num_train_clients = 2
     min_fit_clients = args.min_fit_clients
     min_evaluate_clients = min_fit_clients
 
