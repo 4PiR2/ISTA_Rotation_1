@@ -1,4 +1,3 @@
-import argparse
 import gc
 from logging import DEBUG, INFO
 import traceback

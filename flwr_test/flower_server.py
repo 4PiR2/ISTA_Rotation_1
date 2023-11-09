@@ -241,14 +241,14 @@ FitResultsAndFailures = Tuple[
     List[Tuple[ClientProxy, FitRes]],
     List[Union[Tuple[ClientProxy, FitRes], BaseException]],
 ]
-EvaluateResultsAndFailures = Tuple[
-    List[Tuple[ClientProxy, EvaluateRes]],
-    List[Union[Tuple[ClientProxy, EvaluateRes], BaseException]],
-]
-ReconnectResultsAndFailures = Tuple[
-    List[Tuple[ClientProxy, DisconnectRes]],
-    List[Union[Tuple[ClientProxy, DisconnectRes], BaseException]],
-]
+# EvaluateResultsAndFailures = Tuple[
+#     List[Tuple[ClientProxy, EvaluateRes]],
+#     List[Union[Tuple[ClientProxy, EvaluateRes], BaseException]],
+# ]
+# ReconnectResultsAndFailures = Tuple[
+#     List[Tuple[ClientProxy, DisconnectRes]],
+#     List[Union[Tuple[ClientProxy, DisconnectRes], BaseException]],
+# ]
 
 
 class FlowerServer(flwr.server.Server):
@@ -311,9 +311,35 @@ class FlowerServer(flwr.server.Server):
     def fit(self, num_rounds: int, timeout: Optional[float]) -> History:
         """Run federated averaging for a number of rounds."""
         history = History()
-
         while self._client_manager.num_available() < self.strategy.min_available_clients:
             pass
+
+        def get_properties_fn(
+                client: ClientProxy, ins: GetPropertiesIns, timeout: Optional[float]
+        ) -> Tuple[ClientProxy, GetPropertiesRes]:
+            """Get properties on a single client."""
+            get_properties_res = client.get_properties(ins, timeout=timeout)
+            return client, get_properties_res
+
+        def fit_fn(
+                client: ClientProxy, ins: FitIns, timeout: Optional[float]
+        ) -> Tuple[ClientProxy, FitRes]:
+            """Refine parameters on a single client."""
+            fit_res = client.fit(ins, timeout=timeout)
+            return client, fit_res
+
+        def evaluate_fn(
+                client: ClientProxy, ins: EvaluateIns, timeout: Optional[float]
+        ) -> Tuple[ClientProxy, EvaluateRes]:
+            """Evaluate parameters on a single client."""
+            evaluate_res = client.evaluate(ins, timeout=timeout)
+            return client, evaluate_res
+
+        log(INFO, "Initializing clients")
+        res_get_properties = self.execute_round(
+            get_properties_fn, self.strategy.configure_get_properties, self.strategy.aggregate_get_properties,
+            0, timeout
+        )
 
         # Initialize parameters
         log(INFO, "Initializing global parameters")
@@ -334,37 +360,10 @@ class FlowerServer(flwr.server.Server):
         log(INFO, "FL starting")
         start_time = timeit.default_timer()
 
-        def get_properties_client_fn(
-                client: ClientProxy, ins: GetPropertiesIns, timeout: Optional[float]
-        ) -> Tuple[ClientProxy, GetPropertiesRes]:
-            """Get properties on a single client."""
-            get_properties_res = client.get_properties(ins, timeout=timeout)
-            return client, get_properties_res
-
-        def fit_client_fn(
-                client: ClientProxy, ins: FitIns, timeout: Optional[float]
-        ) -> Tuple[ClientProxy, FitRes]:
-            """Refine parameters on a single client."""
-            fit_res = client.fit(ins, timeout=timeout)
-            return client, fit_res
-
-        def evaluate_client_fn(
-                client: ClientProxy, ins: EvaluateIns, timeout: Optional[float]
-        ) -> Tuple[ClientProxy, EvaluateRes]:
-            """Evaluate parameters on a single client."""
-            evaluate_res = client.evaluate(ins, timeout=timeout)
-            return client, evaluate_res
-
-        log(INFO, "Initializing clients")
-        res_get_properties = self.execute_round(
-            get_properties_client_fn, self.strategy.configure_get_properties, self.strategy.aggregate_get_properties,
-            0, timeout
-        )
-
-        for current_round in range(1 + self.strategy.init_round, 1 + self.strategy.init_round + num_rounds):
+        for current_round in range(1 + self.strategy.init_round, 1 + num_rounds):
             # Train model and replace previous global model
             res_fit = self.execute_round(
-                fit_client_fn, self.strategy.configure_fit, self.strategy.aggregate_fit, current_round, timeout
+                fit_fn, self.strategy.configure_fit, self.strategy.aggregate_fit, current_round, timeout
             )
 
             if res_fit is not None:
@@ -397,7 +396,7 @@ class FlowerServer(flwr.server.Server):
 
             # Evaluate model on a sample of available clients
             res_fed = self.execute_round(
-                evaluate_client_fn, self.strategy.configure_evaluate, self.strategy.aggregate_evaluate, current_round, timeout
+                evaluate_fn, self.strategy.configure_evaluate, self.strategy.aggregate_evaluate, current_round, timeout
             )
 
             if res_fed is not None:
