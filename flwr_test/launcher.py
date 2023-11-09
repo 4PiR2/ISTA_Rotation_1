@@ -4,35 +4,18 @@ import time
 
 import flwr
 import torch
-import wandb
 
 from flower_client import FlowerClient
 from flower_server import make_server
 from parse_args import parse_args
-from utils import run
+from utils import run, init_wandb, finish_wandb
 
 
 def main():
     args = parse_args()
-    try:
-        with open('wandb_token.txt', 'r') as f:
-            wandb_token = f.readline().strip()
-        wandb_login = wandb.login(key=wandb_token)
-    except Exception as _:
-        wandb_login = False
-    if wandb_login:
-        wandb.init(
-            # Set the project where this run will be logged
-            project='test',
-            # We pass a run name (otherwise it’ll be randomly assigned, like sunshine-lollypop-10)
-            name=f'experiment_{18}',
-            # Track hyperparameters and run metadata
-            config={
-                **vars(args),
-            })
-
     mode = args.mode
     if mode == 'simulated':
+        init_wandb(args, f'experiment_{21}')
         server = make_server(args)
         config = {
             'num_train_clients': server.strategy.num_train_clients,
@@ -68,6 +51,8 @@ def main():
             config=flwr.server.ServerConfig(num_rounds=args.num_rounds),
             client_resources=client_resources,
         )
+
+        finish_wandb()
     else:
         run(['pkill', '-9', '-f', '-e', '-c', 'python3 flower_server.py'])
         run(['pkill', '-9', '-f', '-e', '-c', 'python3 flower_client.py'])
@@ -107,8 +92,6 @@ def main():
             log_file.close()
 
     print('END', flush=True)
-    if wandb.run is not None:
-        wandb.finish()  # Mark the run as finished
 
 
 if __name__ == '__main__':

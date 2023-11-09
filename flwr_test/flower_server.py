@@ -1,8 +1,9 @@
 import argparse
+import concurrent.futures
 import timeit
 from logging import DEBUG, INFO
 import os
-from typing import Any, Dict, KeysView, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, KeysView, List, Optional, Tuple, Union
 
 import flwr
 from flwr.common import (
@@ -29,6 +30,7 @@ import wandb
 from PeFLL.models import CNNTarget
 
 from parse_args import parse_args
+from utils import init_wandb, finish_wandb
 
 
 def weighted_average(metrics: List[Tuple[int, Metrics]]) -> Metrics:
@@ -102,11 +104,10 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
             parameters = flwr.common.ndarrays_to_parameters(list(state_dict.values()))
         return parameters
 
-    @staticmethod
-    def get_all_cids(client_manager: ClientManager) -> List[str]:
-        return sorted(list(client_manager.all().keys()))
+    def configure_common(self, client_config_pairs: List[Tuple[ClientProxy, Any]], client_manager: ClientManager) \
+            -> List[Dict[str, Scalar]]:
+        all_cids = sorted(list(client_manager.all().keys()))
 
-    def configure_cids(self, client_config_pairs: List[Tuple[ClientProxy, Any]], all_cids: List[str]) -> List[int]:
         if self.mode == 'multiplex':
             cids = np.random.choice(np.arange(self.num_train_clients), len(client_config_pairs), replace=False).tolist()
         elif self.mode == 'simulated':
@@ -114,10 +115,8 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
         elif self.mode == 'distributed':
             cids = [all_cids.index(client.cid) for client, _ in client_config_pairs]
         else:
-            cids = None
-        return cids
+            cids = [None] * len(client_config_pairs)
 
-    def configure_devices(self, client_config_pairs: List[Tuple[ClientProxy, Any]], all_cids: List[str]) -> List[str]:
         num_gpus = torch.cuda.device_count()
         if num_gpus > 0:
             if self.mode == 'simulated':
@@ -126,7 +125,13 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
                 devices = [f'cuda:{all_cids.index(client.cid) % num_gpus}' for client, _ in client_config_pairs]
         else:
             devices = ['cpu'] * len(client_config_pairs)
-        return devices
+
+        configs = [{
+                'cid': cid,
+                'device': device,
+            } for cid, device in zip(cids, devices)
+        ]
+        return configs
 
     def configure_fit(self, server_round: int, parameters: Parameters, client_manager: ClientManager) -> List[
         Tuple[ClientProxy, FitIns]]:
@@ -138,18 +143,15 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
             'weight_decay': self.optimizer_inner_weight_decay,
         }
 
-        all_cids = self.get_all_cids(client_manager)
-        cids = self.configure_cids(client_config_pairs, all_cids)
-        devices = self.configure_devices(client_config_pairs, all_cids)
+        common_configs = self.configure_common(client_config_pairs, client_manager)
         client_config_pairs_updated: List[Tuple[ClientProxy, FitIns]] = []
         for i, (client, fit_ins) in enumerate(client_config_pairs):
             config = {
+                **common_configs[i],
                 **fit_ins.config,
-                'cid': cids[i],
-                'device': devices[i],
+                **optimizer_config,
                 'num_epochs': 1,
                 'verbose': False,
-                **optimizer_config,
             }
             client_config_pairs_updated.append((client, FitIns(fit_ins.parameters, config)))
         return client_config_pairs_updated
@@ -157,15 +159,12 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
     def configure_evaluate(self, server_round: int, parameters: Parameters, client_manager: ClientManager) -> List[
         Tuple[ClientProxy, EvaluateIns]]:
         client_config_pairs = super().configure_evaluate(server_round, parameters, client_manager)
-        all_cids = self.get_all_cids(client_manager)
-        cids = self.configure_cids(client_config_pairs, all_cids)
-        devices = self.configure_devices(client_config_pairs, all_cids)
+        common_configs = self.configure_common(client_config_pairs, client_manager)
         client_config_pairs_updated: List[Tuple[ClientProxy, EvaluateIns]] = []
         for i, (client, evaluate_ins) in enumerate(client_config_pairs):
             config = {
+                **common_configs[i],
                 **evaluate_ins.config,
-                'cid': cids[i],
-                'device': devices[i],
             }
             client_config_pairs_updated.append((client, EvaluateIns(evaluate_ins.parameters, config)))
         return client_config_pairs_updated
@@ -244,6 +243,58 @@ class FlowerServer(flwr.server.Server):
                 config['embedding_dir_path'] = self.strategy.client_data_embedding_dir_path
             _ = client.get_properties(ins=GetPropertiesIns(config), timeout=None)
 
+    def do_round(self, do_client_fn: Callable, configure_client_instructions_fn: Callable, aggregate_fn: Callable,
+                 server_round: int, timeout: Optional[float]) -> Optional[
+        Tuple[Optional[Parameters], Dict[str, Scalar], FitResultsAndFailures]
+    ]:
+        """Perform a single round of communication."""
+        # Get clients and their respective instructions from strategy
+        client_instructions = configure_client_instructions_fn(
+            server_round=server_round,
+            parameters=self.parameters,
+            client_manager=self._client_manager,
+        )
+        if not client_instructions:
+            log(INFO, "do_round %s: no clients selected, cancel", server_round)
+            return None
+        log(DEBUG, "do_round %s: strategy sampled %s clients (out of %s)",
+            server_round, len(client_instructions), self._client_manager.num_available())
+        # Collect `do` results from all clients participating in this round
+        """Refine parameters concurrently on all selected clients."""
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            submitted_fs = {
+                executor.submit(do_client_fn, client_proxy, ins, timeout)
+                for client_proxy, ins in client_instructions
+            }
+            # Handled in the respective communication stack
+            finished_fs, _ = concurrent.futures.wait(fs=submitted_fs, timeout=None)
+
+        # Gather results
+        results: List[Tuple[ClientProxy, FitRes]] = []
+        failures: List[Union[Tuple[ClientProxy, FitRes], BaseException]] = []
+        for future in finished_fs:
+            """Convert finished future into either a result or a failure."""
+            # Check if there was an exception
+            failure = future.exception()
+            if failure is not None:
+                failures.append(failure)
+                return
+            # Successfully received a result from a client
+            result: Tuple[ClientProxy, FitRes] = future.result()
+            _, res = result
+            # Check result status code
+            if res.status.code == Code.OK:
+                results.append(result)
+                return
+            # Not successful, client returned a result where the status code is not OK
+            failures.append(result)
+        log(DEBUG, "do_round %s received %s results and %s failures", server_round, len(results), len(failures))
+        # Aggregate training results
+        aggregated_result: Tuple[Optional[Parameters], Dict[str, Scalar]] \
+            = aggregate_fn(server_round, results, failures)
+        parameters_aggregated, metrics_aggregated = aggregated_result
+        return parameters_aggregated, metrics_aggregated, (results, failures)
+
     def fit(self, num_rounds: int, timeout: Optional[float]) -> History:
         """Run federated averaging for a number of rounds."""
         history = History()
@@ -266,18 +317,33 @@ class FlowerServer(flwr.server.Server):
             history.add_loss_centralized(server_round=0, loss=res[0])
             history.add_metrics_centralized(server_round=0, metrics=res[1])
 
+        log(INFO, "Initializing clients")
         self.get_client_properties()
 
         # Run federated learning for num_rounds
         log(INFO, "FL starting")
         start_time = timeit.default_timer()
 
+        def fit_client_fn(
+                client: ClientProxy, ins: FitIns, timeout: Optional[float]
+        ) -> Tuple[ClientProxy, FitRes]:
+            """Refine parameters on a single client."""
+            fit_res = client.fit(ins, timeout=timeout)
+            return client, fit_res
+
+        configure_client_instructions_fn = self.strategy.configure_fit
+        aggregate_fn = self.strategy.aggregate_fit
+
         for current_round in range(1 + self.strategy.init_round, 1 + self.strategy.init_round + num_rounds):
             # Train model and replace previous global model
-            res_fit = self.fit_round(
-                server_round=current_round,
-                timeout=timeout,
-            )
+            if False:
+                res_fit = self.fit_round(
+                    server_round=current_round,
+                    timeout=timeout,
+                )
+            else:
+                res_fit = do_round(fit_client_fn, configure_client_instructions_fn, aggregate_fn, current_round, timeout)
+
             if res_fit is not None:
                 parameters_prime, fit_metrics, _ = res_fit  # fit_metrics_aggregated
                 if parameters_prime:
@@ -285,6 +351,9 @@ class FlowerServer(flwr.server.Server):
                 history.add_metrics_distributed_fit(
                     server_round=current_round, metrics=fit_metrics
                 )
+
+            if current_round % self.strategy.eval_interval:
+                continue
 
             # Evaluate model using strategy implementation
             res_cen = self.strategy.evaluate(current_round, parameters=self.parameters)
@@ -302,9 +371,6 @@ class FlowerServer(flwr.server.Server):
                 history.add_metrics_centralized(
                     server_round=current_round, metrics=metrics_cen
                 )
-
-            if current_round % self.strategy.eval_interval:
-                continue
 
             # Evaluate model on a sample of available clients
             res_fed = self.evaluate_round(server_round=current_round, timeout=timeout)
@@ -370,12 +436,14 @@ def make_server(args: argparse.Namespace):
 
 def main():
     args = parse_args()
+    init_wandb(args, f'experiment_{21}')
     server = make_server(args)
     flwr.server.start_server(
         server_address=f"0.0.0.0:{args.server_address.split(':')[-1]}",
         server=server,
         config=flwr.server.ServerConfig(num_rounds=args.num_rounds),
     )
+    finish_wandb()
 
 
 if __name__ == '__main__':

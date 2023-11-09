@@ -1,6 +1,9 @@
+import argparse
 import os
 import subprocess
 from typing import List, Optional
+
+import wandb
 
 
 def run(cmd: List[str], cwd: Optional[str] = None, env=None, shell=False, blocking: bool = True):
@@ -31,3 +34,27 @@ def run(cmd: List[str], cwd: Optional[str] = None, env=None, shell=False, blocki
     print('EXIT CODE:', rc, flush=True)
     # assert rc == 0
     return rc, ''.join(lines), ''.join(lines_out), ''.join(lines_err)
+
+
+def init_wandb(args: argparse.Namespace, experiment_name: Optional[str] = None):
+    try:
+        with open('wandb_token.txt', 'r') as f:
+            wandb_token = f.readline().strip()
+        wandb_login = wandb.login(key=wandb_token)
+    except Exception as _:
+        wandb_login = False
+    if wandb_login:
+        wandb.init(
+            # Set the project where this run will be logged
+            project='test',
+            # We pass a run name (otherwise it’ll be randomly assigned, like sunshine-lollypop-10)
+            name=experiment_name,
+            # Track hyperparameters and run metadata
+            config={
+                **vars(args),
+            })
+
+
+def finish_wandb():
+    if wandb.run is not None:
+        wandb.finish()  # Mark the run as finished
