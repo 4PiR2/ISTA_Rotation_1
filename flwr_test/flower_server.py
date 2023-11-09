@@ -243,13 +243,13 @@ class FlowerServer(flwr.server.Server):
                 config['embedding_dir_path'] = self.strategy.client_data_embedding_dir_path
             _ = client.get_properties(ins=GetPropertiesIns(config), timeout=None)
 
-    def do_round(self, do_client_fn: Callable, configure_client_instructions_fn: Callable, aggregate_fn: Callable,
-                 server_round: int, timeout: Optional[float]) -> Optional[
+    def execute_round(self, client_execute_fn: Callable, client_instructions_fn: Callable, aggregate_fn: Callable,
+                      server_round: int, timeout: Optional[float]) -> Optional[
         Tuple[Optional[Parameters], Dict[str, Scalar], FitResultsAndFailures]
     ]:
         """Perform a single round of communication."""
         # Get clients and their respective instructions from strategy
-        client_instructions = configure_client_instructions_fn(
+        client_instructions = client_instructions_fn(
             server_round=server_round,
             parameters=self.parameters,
             client_manager=self._client_manager,
@@ -259,11 +259,11 @@ class FlowerServer(flwr.server.Server):
             return None
         log(DEBUG, "do_round %s: strategy sampled %s clients (out of %s)",
             server_round, len(client_instructions), self._client_manager.num_available())
-        # Collect `do` results from all clients participating in this round
+        # Collect `execute` results from all clients participating in this round
         """Refine parameters concurrently on all selected clients."""
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             submitted_fs = {
-                executor.submit(do_client_fn, client_proxy, ins, timeout)
+                executor.submit(client_execute_fn, client_proxy, ins, timeout)
                 for client_proxy, ins in client_instructions
             }
             # Handled in the respective communication stack
@@ -278,14 +278,12 @@ class FlowerServer(flwr.server.Server):
             failure = future.exception()
             if failure is not None:
                 failures.append(failure)
-                return
             # Successfully received a result from a client
             result: Tuple[ClientProxy, FitRes] = future.result()
             _, res = result
             # Check result status code
             if res.status.code == Code.OK:
                 results.append(result)
-                return
             # Not successful, client returned a result where the status code is not OK
             failures.append(result)
         log(DEBUG, "do_round %s received %s results and %s failures", server_round, len(results), len(failures))
@@ -331,8 +329,12 @@ class FlowerServer(flwr.server.Server):
             fit_res = client.fit(ins, timeout=timeout)
             return client, fit_res
 
-        configure_client_instructions_fn = self.strategy.configure_fit
-        aggregate_fn = self.strategy.aggregate_fit
+        def evaluate_client_fn(
+                client: ClientProxy, ins: EvaluateIns, timeout: Optional[float]
+        ) -> Tuple[ClientProxy, EvaluateRes]:
+            """Refine parameters on a single client."""
+            evaluate_res = client.evaluate(ins, timeout=timeout)
+            return client, evaluate_res
 
         for current_round in range(1 + self.strategy.init_round, 1 + self.strategy.init_round + num_rounds):
             # Train model and replace previous global model
@@ -342,7 +344,9 @@ class FlowerServer(flwr.server.Server):
                     timeout=timeout,
                 )
             else:
-                res_fit = do_round(fit_client_fn, configure_client_instructions_fn, aggregate_fn, current_round, timeout)
+                res_fit = self.execute_round(
+                    fit_client_fn, self.strategy.configure_fit, self.strategy.aggregate_fit, current_round, timeout
+                )
 
             if res_fit is not None:
                 parameters_prime, fit_metrics, _ = res_fit  # fit_metrics_aggregated
@@ -373,7 +377,16 @@ class FlowerServer(flwr.server.Server):
                 )
 
             # Evaluate model on a sample of available clients
-            res_fed = self.evaluate_round(server_round=current_round, timeout=timeout)
+            if False:
+                res_fed = self.evaluate_round(
+                    server_round=current_round,
+                    timeout=timeout,
+                )
+            else:
+                res_fed = self.execute_round(
+                    evaluate_client_fn, self.strategy.configure_evaluate, self.strategy.aggregate_evaluate, current_round, timeout
+                )
+
             if res_fed is not None:
                 loss_fed, evaluate_metrics_fed, _ = res_fed
                 if loss_fed is not None:
