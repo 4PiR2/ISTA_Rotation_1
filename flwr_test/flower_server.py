@@ -39,24 +39,22 @@ from utils import init_wandb, finish_wandb
 class FlowerStrategy(flwr.server.strategy.FedAvg):
     def __init__(
             self,
+            mode: str,
             num_train_clients: int,
             state_dict_keys: KeysView,
-            mode: str,
-            init_round: int = 0,
             eval_interval: int = 10,
-            optimizer_inner_lr: float = 2e-3,
-            optimizer_inner_momentum: float = .9,
-            optimizer_inner_weight_decay: float = 5e-5,
-            client_data_seed: int = 42,
-            client_data_data_name: str = 'cifar10',
-            client_data_data_path: str = './dataset',
-            client_data_num_clients: int = 100,
-            client_data_batch_size: int = 32,
-            client_data_partition_type: str = 'by_class',
-            client_data_classes_per_user: int = 2,
-            client_data_alpha_train: Optional[float] = None,
-            client_data_alpha_test: Optional[float] = None,
-            client_data_embedding_dir_path: Optional[str] = None,
+            init_round: int = 0,
+            client_dataset_seed: int = 42,
+            client_dataset_data_name: str = 'cifar10',
+            client_dataset_data_path: str = './dataset',
+            client_dataset_num_clients: int = 100,
+            client_dataset_batch_size: int = 32,
+            client_dataset_partition_type: str = 'by_class',
+            client_dataset_alpha_train: float = .1,
+            client_dataset_alpha_test: float = .1,
+            client_optimizer_target_lr: float = 2e-3,
+            client_optimizer_target_momentum: float = .9,
+            client_optimizer_target_weight_decay: float = 5e-5,
             *args, **kwargs
     ):
         def weighted_average(metrics: List[Tuple[int, Metrics]]) -> Metrics:
@@ -84,19 +82,17 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
         self.mode: str = mode
         self.init_round: int = init_round
         self.eval_interval: int = eval_interval
-        self.optimizer_inner_lr: float = optimizer_inner_lr
-        self.optimizer_inner_momentum: float = optimizer_inner_momentum
-        self.optimizer_inner_weight_decay: float = optimizer_inner_weight_decay
-        self.client_data_seed: int = client_data_seed
-        self.client_data_data_name: str = client_data_data_name
-        self.client_data_data_path: str = client_data_data_path
-        self.client_data_num_clients: int = client_data_num_clients
-        self.client_data_batch_size: int = client_data_batch_size
-        self.client_data_partition_type: str = client_data_partition_type
-        self.client_data_classes_per_user: int = client_data_classes_per_user
-        self.client_data_alpha_train: Optional[float] = client_data_alpha_train
-        self.client_data_alpha_test: Optional[float] = client_data_alpha_test
-        self.client_data_embedding_dir_path: Optional[str] = client_data_embedding_dir_path
+        self.client_optimizer_target_lr: float = client_optimizer_target_lr
+        self.client_optimizer_target_momentum: float = client_optimizer_target_momentum
+        self.client_optimizer_target_weight_decay: float = client_optimizer_target_weight_decay
+        self.client_dataset_seed: int = client_dataset_seed
+        self.client_dataset_data_name: str = client_dataset_data_name
+        self.client_dataset_data_path: str = client_dataset_data_path
+        self.client_dataset_num_clients: int = client_dataset_num_clients
+        self.client_dataset_batch_size: int = client_dataset_batch_size
+        self.client_dataset_partition_type: str = client_dataset_partition_type
+        self.client_dataset_alpha_train: float = client_dataset_alpha_train
+        self.client_dataset_alpha_test: float = client_dataset_alpha_test
 
     def initialize_parameters(self, client_manager: ClientManager) -> Optional[Parameters]:
         parameters = super().initialize_parameters(client_manager)
@@ -141,20 +137,15 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
         for i, (cid, client) in enumerate(client_manager.all().items()):
             config = {
                 'num_train_clients': self.num_train_clients,
-                'seed': self.client_data_seed,
-                'data_name': self.client_data_data_name,
-                'data_path': self.client_data_data_path,
-                'num_clients': self.client_data_num_clients,
-                'batch_size': self.client_data_batch_size,
-                'partition_type': self.client_data_partition_type,
-                'classes_per_user': self.client_data_classes_per_user,
+                'seed': self.client_dataset_seed,
+                'data_name': self.client_dataset_data_name,
+                'data_path': self.client_dataset_data_path,
+                'num_clients': self.client_dataset_num_clients,
+                'batch_size': self.client_dataset_batch_size,
+                'partition_type': self.client_dataset_partition_type,
+                'alpha_train': self.client_dataset_alpha_train,
+                'alpha_test': self.client_dataset_alpha_test,
             }
-            if self.client_data_alpha_train is not None:
-                config['alpha_train'] = self.client_data_alpha_train
-            if self.client_data_alpha_test is not None:
-                config['alpha_test'] = self.client_data_alpha_test
-            if self.client_data_embedding_dir_path is not None:
-                config['embedding_dir_path'] = self.client_data_embedding_dir_path
             client_config_pairs_updated.append((client, GetPropertiesIns(config)))
         return client_config_pairs_updated
 
@@ -163,9 +154,9 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
         client_config_pairs = super().configure_fit(server_round, parameters, client_manager)
 
         optimizer_config = {
-            'lr': self.optimizer_inner_lr,
-            'momentum': self.optimizer_inner_momentum,
-            'weight_decay': self.optimizer_inner_weight_decay,
+            'lr': self.client_optimizer_target_lr,
+            'momentum': self.client_optimizer_target_momentum,
+            'weight_decay': self.client_optimizer_target_weight_decay,
         }
 
         common_configs = self._configure_common(client_config_pairs, client_manager)
@@ -418,42 +409,38 @@ class FlowerServer(flwr.server.Server):
 
 def make_server(args: argparse.Namespace):
     mode: str = args.mode
-    num_clients = args.client_data_num_clients
-    num_train_clients = int(num_clients * .9)
-    # num_train_clients = 2
-    min_fit_clients = args.min_fit_clients
-    min_evaluate_clients = min_fit_clients
+    num_train_clients = args.num_train_clients
+    num_step_clients = args.num_step_clients
+    num_evaluate_clients = num_step_clients
 
     if mode in ['simulated', 'distributed']:
-        min_available_clients = num_train_clients
+        num_available_clients = num_train_clients
     elif mode in ['multiplex']:
-        min_available_clients = min_fit_clients
+        num_available_clients = num_step_clients
     else:
-        min_available_clients = int(1e9)
+        num_available_clients = int(1e9)
 
     # Create strategy
     strategy = FlowerStrategy(
-        min_fit_clients=min_fit_clients,
-        min_evaluate_clients=min_evaluate_clients,
-        min_available_clients=min_available_clients,  # Wait until all clients are available
+        min_fit_clients=num_step_clients,
+        min_evaluate_clients=num_evaluate_clients,
+        min_available_clients=num_available_clients,  # Wait until all clients are available
+        mode=mode,
         num_train_clients=num_train_clients,
         state_dict_keys=CNNTarget().state_dict().keys(),
-        mode=mode,
         init_round=args.init_round,
         eval_interval=args.eval_interval,
-        optimizer_inner_lr=args.optimizer_inner_lr,
-        optimizer_inner_momentum=args.optimizer_inner_momentum,
-        optimizer_inner_weight_decay=args.optimizer_inner_weight_decay,
-        client_data_seed=args.client_data_seed,
-        client_data_data_name=args.client_data_data_name,
-        client_data_data_path=args.client_data_data_path,
-        client_data_num_clients=num_clients,
-        client_data_batch_size=args.client_data_batch_size,
-        client_data_partition_type=args.client_data_partition_type,
-        client_data_classes_per_user=args.client_data_classes_per_user,
-        client_data_alpha_train=args.client_data_alpha_train,
-        client_data_alpha_test=args.client_data_alpha_test,
-        client_data_embedding_dir_path=args.client_data_embedding_dir_path,
+        client_dataset_seed=args.client_dataset_seed,
+        client_dataset_data_name=args.client_dataset_data_name,
+        client_dataset_data_path=args.client_dataset_data_path,
+        client_dataset_num_clients=args.client_dataset_num_clients,
+        client_dataset_batch_size=args.client_dataset_batch_size,
+        client_dataset_partition_type=args.client_dataset_partition_type,
+        client_dataset_alpha_train=args.client_dataset_alpha_train,
+        client_dataset_alpha_test=args.client_dataset_alpha_test,
+        client_optimizer_target_lr=args.client_optimizer_target_lr,
+        client_optimizer_target_momentum=args.client_optimizer_target_momentum,
+        client_optimizer_target_weight_decay=args.client_optimizer_target_weight_decay,
     )
 
     server = FlowerServer(client_manager=SimpleClientManager(), strategy=strategy)

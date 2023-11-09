@@ -57,20 +57,19 @@ def main():
         run(['pkill', '-9', '-f', '-e', '-c', 'python3 flower_server.py'])
         run(['pkill', '-9', '-f', '-e', '-c', 'python3 flower_client.py'])
 
-        num_clients = args.client_data_num_clients
-        num_train_clients = int(num_clients * .9)
-        min_fit_clients = int(num_train_clients * .1)
+        num_train_clients = args.num_train_clients
+        num_step_clients = args.num_step_clients
         if mode == 'distributed':
-            min_available_clients = num_train_clients
+            num_available_clients = num_train_clients
         elif mode == 'multiplex':
-            min_available_clients = min_fit_clients
+            num_available_clients = num_step_clients
         else:
             return
 
         p_server = run(['python3', 'flower_server.py'] + sys.argv[1:], blocking=False)
         time.sleep(10.)
         p_clients = [run(['python3', 'flower_client.py'] + sys.argv[1:], blocking=False)
-                     for _ in range(min_available_clients)]
+                     for _ in range(num_available_clients)]
 
         os.makedirs(os.path.join('outputs', 'logs'), exist_ok=True)
         log_files = [open(os.path.join('outputs', 'logs', f'C{i}.txt'), 'w') for i in range(1+len(p_clients))]

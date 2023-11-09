@@ -25,21 +25,82 @@ class FlowerClient(flwr.client.NumPyClient):
         self.testloaders: List[DataLoader] = []
 
     def get_properties(self, config: Config) -> Dict[str, Scalar]:
+        data_name = config['data_name']
+        data_path = config['data_path']
+        num_users = config['num_clients'] if data_name != 'femnist' else 3597
+        num_train_users = config['num_train_clients']
+        bz = config['batch_size']
+        partition_type = config['partition_type']
+        classes_per_user = 2 if data_name == 'cifar10' else 10
+        alpha_train = config['alpha_train']
+        alpha_test = config['alpha_test']
+        embedding_dir_path = None
+
+        # Infer on range of OOD test clients
+        alpha_test_range = None
+        if alpha_test == -1.:
+            assert partition_type == 'dirichlet'
+            alpha_test_range = np.arange(1., 11.) * .1
+            alpha_test = alpha_train
+
         set_seed(config['seed'])
         self.trainloaders, self.valloaders, self.testloaders = gen_random_loaders(
-            data_name=config['data_name'],
-            data_path=config['data_path'],
-            num_users=config['num_clients'],
-            num_train_users=config['num_train_clients'],
-            bz=config['batch_size'],
-            partition_type=config['partition_type'],
-            classes_per_user=config['classes_per_user'],
-            alpha_train=config['alpha_train'] if 'alpha_train' in config else None,
-            alpha_test=config['alpha_test'] if 'alpha_test' in config else None,
-            embedding_dir_path=config['embedding_dir_path'] if 'embedding_dir_path' in config else None,
+            data_name=data_name,
+            data_path=data_path,
+            num_users=num_users,
+            num_train_users=num_train_users,
+            bz=bz,
+            partition_type=partition_type,
+            classes_per_user=classes_per_user,
+            alpha_train=alpha_train,
+            alpha_test=alpha_test,
+            embedding_dir_path=embedding_dir_path,
         )
         if 'seed2' in config:
             set_seed(config['seed2'])
+
+        # if embed_dim == -1:
+        #     # auto embedding size
+        #     embed_dim = int(1. + num_users * .25)
+        #
+        # if data_name == 'cifar10':
+        #     if embed_model == 'mlp':
+        #         enet = MLPEmbed(10, embed_dim)
+        #     elif embed_model == 'cnn':
+        #         enet = CNNEmbed(embed_y, 10, embed_dim, device)
+        #     else:
+        #         raise ValueError('Choose model from mlp or cnn.')
+        #     hnet = CNNHyper(num_nodes, embed_dim, hidden_dim=hyper_hid, n_hidden=hyper_nhid, n_kernels=n_kernels)
+        #     joint = EmbedHyper(enet, hnet)
+        #     net = CNNTarget(n_kernels=n_kernels)
+        # elif data_name == "cifar100":
+        #     if embed_model == 'mlp':
+        #         enet = MLPEmbed(100, embed_dim)
+        #     elif embed_model == 'cnn':
+        #         enet = CNNEmbed(embed_y, 100, embed_dim, device)
+        #     else:
+        #         raise ValueError('Choose model from mlp or cnn.')
+        #
+        #     hnet = CNNHyper(num_nodes, embed_dim, hidden_dim=hyper_hid,
+        #                     n_hidden=hyper_nhid, n_kernels=n_kernels, out_dim=100)
+        #     joint = EmbedHyper(enet, hnet)
+        #     net = CNNTarget(n_kernels=n_kernels, out_dim=100)
+        # elif data_name == 'femnist':
+        #     if embed_model == 'mlp':
+        #         enet = MLPEmbed(62, embed_dim)
+        #     elif embed_model == 'cnn':
+        #         enet = CNNEmbed(embed_y, 62, embed_dim, device, in_channels=1)
+        #     else:
+        #         raise ValueError('Choose model from mlp or cnn.')
+        #
+        #     hnet = CNNHyper(num_nodes, embed_dim, in_channels=1, hidden_dim=hyper_hid,
+        #                     n_hidden=hyper_nhid, n_kernels=n_kernels, out_dim=62)
+        #     joint = EmbedHyper(enet, hnet)
+        #     net = CNNTarget(in_channels=1, n_kernels=n_kernels, out_dim=62)
+        #
+        # else:
+        #     raise ValueError("choose data_name from ['cifar10', 'cifar100']")
+
         return super().get_properties(config)
 
     def get_parameters(self, config: Config):
