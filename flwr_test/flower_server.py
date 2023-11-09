@@ -102,7 +102,11 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
             parameters = flwr.common.ndarrays_to_parameters(list(state_dict.values()))
         return parameters
 
-    def configure_cid(self, client_config_pairs: List[Tuple[ClientProxy, Any]], all_cids: List[str]) -> List[int]:
+    @staticmethod
+    def get_all_cids(client_manager: ClientManager) -> List[str]:
+        return sorted(list(client_manager.all().keys()))
+
+    def configure_cids(self, client_config_pairs: List[Tuple[ClientProxy, Any]], all_cids: List[str]) -> List[int]:
         if self.mode == 'multiplex':
             cids = np.random.choice(np.arange(self.num_train_clients), len(client_config_pairs), replace=False).tolist()
         elif self.mode == 'simulated':
@@ -112,6 +116,17 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
         else:
             cids = None
         return cids
+
+    def configure_devices(self, client_config_pairs: List[Tuple[ClientProxy, Any]], all_cids: List[str]) -> List[str]:
+        num_gpus = torch.cuda.device_count()
+        if num_gpus > 0:
+            if self.mode == 'simulated':
+                devices = ['cuda'] * len(client_config_pairs)
+            else:
+                devices = [f'cuda:{all_cids.index(client.cid) % num_gpus}' for client, _ in client_config_pairs]
+        else:
+            devices = ['cpu'] * len(client_config_pairs)
+        return devices
 
     def configure_fit(self, server_round: int, parameters: Parameters, client_manager: ClientManager) -> List[
         Tuple[ClientProxy, FitIns]]:
@@ -123,15 +138,15 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
             'weight_decay': self.optimizer_inner_weight_decay,
         }
 
-        all_cids: List[str] = sorted(list(client_manager.all().keys()))
-        cids = self.configure_cid(client_config_pairs, all_cids)
-        num_gpus = torch.cuda.device_count()
+        all_cids = self.get_all_cids(client_manager)
+        cids = self.configure_cids(client_config_pairs, all_cids)
+        devices = self.configure_devices(client_config_pairs, all_cids)
         client_config_pairs_updated: List[Tuple[ClientProxy, FitIns]] = []
         for i, (client, fit_ins) in enumerate(client_config_pairs):
             config = {
                 **fit_ins.config,
                 'cid': cids[i],
-                'device': f'cuda:{all_cids.index(client.cid) % num_gpus}' if num_gpus else 'cpu',
+                'device': devices[i],
                 'num_epochs': 1,
                 'verbose': False,
                 **optimizer_config,
@@ -142,15 +157,15 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
     def configure_evaluate(self, server_round: int, parameters: Parameters, client_manager: ClientManager) -> List[
         Tuple[ClientProxy, EvaluateIns]]:
         client_config_pairs = super().configure_evaluate(server_round, parameters, client_manager)
-        all_cids: List[str] = sorted(list(client_manager.all().keys()))
-        cids = self.configure_cid(client_config_pairs, all_cids)
-        num_gpus = torch.cuda.device_count()
+        all_cids = self.get_all_cids(client_manager)
+        cids = self.configure_cids(client_config_pairs, all_cids)
+        devices = self.configure_devices(client_config_pairs, all_cids)
         client_config_pairs_updated: List[Tuple[ClientProxy, EvaluateIns]] = []
         for i, (client, evaluate_ins) in enumerate(client_config_pairs):
             config = {
                 **evaluate_ins.config,
                 'cid': cids[i],
-                'device': f'cuda:{all_cids.index(client.cid) % num_gpus}' if num_gpus else 'cpu',
+                'device': devices[i],
             }
             client_config_pairs_updated.append((client, EvaluateIns(evaluate_ins.parameters, config)))
         return client_config_pairs_updated
@@ -314,7 +329,7 @@ def make_server(args: argparse.Namespace):
     mode: str = args.mode
     num_clients = args.client_data_num_clients
     num_train_clients = int(num_clients * .9)
-    min_fit_clients = int(num_train_clients * .1)
+    min_fit_clients = args.min_fit_clients
     min_evaluate_clients = min_fit_clients
 
     if mode in ['simulated', 'distributed']:
@@ -355,30 +370,12 @@ def make_server(args: argparse.Namespace):
 
 def main():
     args = parse_args()
-    # with open('wandb_token.txt', 'r') as f:
-    #     wandb_token = f.readline().strip()
-    # wandb_login = wandb.login(key=wandb_token)
-    # if wandb_login:
-    #     wandb.init(
-    #         # Set the project where this run will be logged
-    #         project='test',
-    #         # We pass a run name (otherwise it’ll be randomly assigned, like sunshine-lollypop-10)
-    #         name=f'experiment_{18}',
-    #         # Track hyperparameters and run metadata
-    #         config={
-    #             **vars(args),
-    #         })
-
     server = make_server(args)
-
     flwr.server.start_server(
         server_address=f"0.0.0.0:{args.server_address.split(':')[-1]}",
         server=server,
         config=flwr.server.ServerConfig(num_rounds=args.num_rounds),
     )
-
-    # if wandb.run is not None:
-    #     wandb.finish()  # Mark the run as finished
 
 
 if __name__ == '__main__':

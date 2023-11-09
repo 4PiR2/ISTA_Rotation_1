@@ -1,7 +1,6 @@
 import time
 
 from PeFLL.dataset import gen_random_loaders
-from PeFLL.utils import set_seed
 
 
 def main(test_id: int):

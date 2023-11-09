@@ -6,6 +6,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--server-address', type=str, default=f'127.0.0.1:{18080}')
     parser.add_argument('--mode', type=str, default='multiplex')
     # parser.add_argument('--num-train-clients', type=int, default=int(100 * .9))
+    parser.add_argument('--min-fit-clients', type=int, default=8)
     parser.add_argument('--num-rounds', type=int, default=1000)
     parser.add_argument('--init-round', type=int, default=0)
     parser.add_argument('--eval-interval', type=int, default=10)

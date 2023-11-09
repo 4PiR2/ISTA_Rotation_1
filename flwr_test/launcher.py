@@ -14,9 +14,12 @@ from utils import run
 
 def main():
     args = parse_args()
-    with open('wandb_token.txt', 'r') as f:
-        wandb_token = f.readline().strip()
-    wandb_login = wandb.login(key=wandb_token)
+    try:
+        with open('wandb_token.txt', 'r') as f:
+            wandb_token = f.readline().strip()
+        wandb_login = wandb.login(key=wandb_token)
+    except Exception as _:
+        wandb_login = False
     if wandb_login:
         wandb.init(
             # Set the project where this run will be logged
@@ -109,5 +112,5 @@ def main():
 
 
 if __name__ == '__main__':
-    os.environ['CUDA_VISIBLE_DEVICES'] = ''
+    # os.environ['CUDA_VISIBLE_DEVICES'] = ''
     main()
