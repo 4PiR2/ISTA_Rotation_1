@@ -37,6 +37,7 @@ def run(cmd: List[str], cwd: Optional[str] = None, env=None, shell=False, blocki
 
 
 def init_wandb(args: argparse.Namespace, experiment_name: Optional[str] = None):
+    # return False
     try:
         with open('wandb_token.txt', 'r') as f:
             wandb_token = f.readline().strip()
@@ -53,6 +54,7 @@ def init_wandb(args: argparse.Namespace, experiment_name: Optional[str] = None):
             config={
                 **vars(args),
             })
+    return wandb_login
 
 
 def finish_wandb():

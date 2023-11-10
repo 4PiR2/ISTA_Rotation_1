@@ -59,12 +59,13 @@ def main():
 
         num_train_clients = args.num_train_clients
         num_step_clients = args.num_step_clients
-        if mode == 'distributed':
-            num_available_clients = num_train_clients
-        elif mode == 'multiplex':
-            num_available_clients = num_step_clients
-        else:
-            return
+        match mode:
+            case 'distributed':
+                num_available_clients = num_train_clients
+            case 'multiplex':
+                num_available_clients = num_step_clients
+            case _:
+                return
 
         p_server = run(['python3', 'flower_server.py'] + sys.argv[1:], blocking=False)
         time.sleep(10.)
