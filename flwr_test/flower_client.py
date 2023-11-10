@@ -4,7 +4,7 @@ import traceback
 from typing import Dict, List, Optional, Tuple
 
 import flwr
-from flwr.common import Config, Scalar
+from flwr.common import Config, Scalar, NDArrays
 from flwr.common.logger import log
 import numpy as np
 import torch
@@ -97,69 +97,110 @@ class FlowerClient(flwr.client.NumPyClient):
 
         return super().get_properties(config)
 
-    def get_parameters(self, config: Config):
-        return [val.detach().cpu().numpy() for _, val in self.tnet.state_dict().items()]
+    def get_parameters(self, config: Config) -> NDArrays:
+        if config is not None and 'net_name' in config:
+            header = [config['net_name']]
+        else:
+            header = []
+            for net_name in self.__dir__():
+                if isinstance(self.__getattribute__(net_name), torch.nn.Module):
+                    header.append(net_name)
+        keys: List[np.ndarray] = []
+        vals: List[np.ndarray] = []
+        for net_name in header:
+            net = self.__getattribute__(net_name)
+            keys.append(np.asarray(list(net.state_dict().keys())))
+            vals.extend([val.detach().cpu().numpy() for val in net.state_dict().values()])
+        return [np.asarray(header)] + keys + vals
 
-    @staticmethod
-    def set_parameters(net: torch.nn.Module, parameters: List[np.ndarray]):
-        state_dict = {k: torch.tensor(v) for k, v in zip(net.state_dict().keys(), parameters)}
-        net.load_state_dict(state_dict, strict=True)
+    def set_parameters(self, parameters: List[np.ndarray]) -> None:
+        for i, net_name in enumerate(parameters[0]):
+            net: torch.nn.Module = self.__getattribute__(net_name)
+            keys = parameters[1 + i]
+            vals = parameters[1 + sum([len(k) for k in parameters[:1+i]]): 1 + sum([len(k) for k in parameters[:2+i]])]
+            state_dict = {k: torch.tensor(v) for k, v in zip(keys, vals)}
+            net.load_state_dict(state_dict, strict=True)
 
-    def fit_0(self, parameters: List[np.ndarray], config: Config):
+    def fit_0(self, parameters: List[np.ndarray], config: Config) -> Tuple[NDArrays, int, Dict[str, Scalar]]:
         device = torch.device(config['device'])
         self.tnet = self.tnet.to(device)
-        self.set_parameters(self.tnet, parameters)
-        trainloader = self.trainloaders[int(config['cid'])]
-        criterion = torch.nn.CrossEntropyLoss()
+        self.set_parameters(parameters)
+        self.tnet.train()
         optimizer = torch.optim.SGD(
             self.tnet.parameters(),
             lr=config['client_optimizer_target_lr'],
             momentum=config['client_optimizer_target_momentum'],
             weight_decay=config['client_optimizer_target_weight_decay']
         )
-        self.tnet.train()
-
-        num_epochs = config['num_epochs']
-        total_loss, total_acc = 0., 0.
-        for epoch in range(num_epochs):
-            correct, epoch_loss = 0, 0.
+        trainloader = self.trainloaders[int(config['cid'])]
+        criterion = torch.nn.CrossEntropyLoss()
+        total_steps = config['client_target_steps']
+        i, length, train_loss, train_acc = 0, 0, 0., 0.
+        while i < total_steps:
             for images, labels in trainloader:
-                images, labels = images.to(device), labels.to(device)
+                if i >= total_steps:
+                    break
+                i += 1
+                length += len(labels)
                 optimizer.zero_grad()
+                images, labels = images.to(device), labels.to(device)
                 outputs = self.tnet(images)
                 loss = criterion(outputs, labels)
                 loss.backward()
                 optimizer.step()
                 # Metrics
-                epoch_loss += loss.item()
+                train_loss += loss.item()
                 if labels.dim() > 1:
                     labels = labels.argmax(dim=-1)
-                correct += (outputs.argmax(dim=-1) == labels).sum().item()
-            epoch_loss /= len(trainloader.dataset)
-            epoch_acc = correct / len(trainloader.dataset)
-            total_loss += epoch_loss
-            total_acc += epoch_acc
+                train_acc += (outputs.argmax(dim=-1) == labels).sum().item()
 
-            if 'verbose' in config and config['verbose']:
-                log(DEBUG, f'Epoch {epoch}: train loss {epoch_loss}, accuracy {epoch_acc}')
-
-        total_loss /= num_epochs
-        total_acc /= num_epochs
+        train_loss /= length
+        train_acc /= length
         gc.collect()
-        return self.get_parameters({}), len(trainloader.dataset), {
-            'loss': float(total_loss), 'accuracy': float(total_acc)}
+        return self.get_parameters({'net_name': 'tnet'}), length, {
+            'loss': float(train_loss), 'accuracy': float(train_acc)}
 
-    def fit(self, parameters: List[np.ndarray], config: Config):
+    def fit_1(self, parameters: List[np.ndarray], config: Config) -> Tuple[NDArrays, int, Dict[str, Scalar]]:
+        device = torch.device(config['device'])
+        self.enet = self.enet.to(device)
+        self.enet.device = device  # bug in PeFLL
+        self.set_parameters(parameters)
+        trainloader = self.trainloaders[int(config['cid'])]
+
+        s = 1.
+
+        embed_batches = config['client_embed_batches']
+        num_batches = embed_batches if embed_batches != -1 else len(trainloader)
+        embed_dim = self.enet.fc3.out_features if isinstance(self.enet, CNNEmbed) else self.enet.fc.out_features
+        embedding = torch.zeros(embed_dim, device=device)
+        length = 0
+        for i, (images, labels) in enumerate(trainloader):
+            length += len(labels)
+            images, labels = images.to(device), labels.to(device)
+            embedding += self.enet((images, labels)).sum(dim=0)
+            if i >= num_batches - 1:
+                break
+        embedding /= length * s
+        embedding_ndarray = embedding.detach().cpu().numpy()
+        return [np.asarray([config['cid']]), embedding_ndarray], length, {}
+
+    def fit(self, parameters: List[np.ndarray], config: Config) -> Tuple[NDArrays, int, Dict[str, Scalar]]:
         """Train the network on the training set."""
         stage = config['stage']
         match stage:
             case 0:
                 return self.fit_0(parameters, config)
+            case 1:
+                return self.fit_1(parameters, config)
+            case 2:
+                return self.fit_2(parameters, config)
+            case 3:
+                return self.fit_3(parameters, config)
 
-    def evaluate_0(self, parameters: List[np.ndarray], config: Config):
+    def evaluate_0(self, parameters: List[np.ndarray], config: Config) -> Tuple[float, int, Dict[str, Scalar]]:
         device = torch.device(config['device'])
         self.tnet = self.tnet.to(device)
-        self.set_parameters(self.tnet, parameters)
+        self.set_parameters(parameters)
         valloader = self.valloaders[int(config['cid'])]
         criterion = torch.nn.CrossEntropyLoss()
         correct, loss = 0, 0.
@@ -177,12 +218,13 @@ class FlowerClient(flwr.client.NumPyClient):
         gc.collect()
         return float(loss), len(valloader.dataset), {'accuracy': float(accuracy)}
 
-    def evaluate(self, parameters: List[np.ndarray], config: Config):
+    def evaluate(self, parameters: List[np.ndarray], config: Config) -> Tuple[float, int, Dict[str, Scalar]]:
         """Evaluate the network on the entire test set."""
         stage = config['stage']
         match stage:
             case 0:
                 return self.evaluate_0(parameters, config)
+
 
 def main():
     args = parse_args()

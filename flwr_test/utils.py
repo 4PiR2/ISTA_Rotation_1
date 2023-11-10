@@ -46,6 +46,7 @@ def init_wandb(args: argparse.Namespace, experiment_name: Optional[str] = None):
         wandb_login = False
     if wandb_login:
         wandb.init(
+            dir=args.log_dir,
             # Set the project where this run will be logged
             project='test',
             # We pass a run name (otherwise it’ll be randomly assigned, like sunshine-lollypop-10)

@@ -72,8 +72,9 @@ def main():
         p_clients = [run(['python3', 'flower_client.py'] + sys.argv[1:], blocking=False)
                      for _ in range(num_available_clients)]
 
-        os.makedirs(os.path.join('outputs', 'logs'), exist_ok=True)
-        log_files = [open(os.path.join('outputs', 'logs', f'C{i}.txt'), 'w') for i in range(1+len(p_clients))]
+        log_dir = args.log_dir
+        os.makedirs(os.path.join(log_dir, 'logs'), exist_ok=True)
+        log_files = [open(os.path.join(log_dir, 'logs', f'C{i}.txt'), 'w') for i in range(1+len(p_clients))]
         rcs = [None] * len(log_files)
         while True:
             for i, p in enumerate([p_server, *p_clients]):
