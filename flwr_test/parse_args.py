@@ -39,10 +39,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--client-optimizer-target-lr', type=float, default=2e-3, help='learning rate for inner optimizer')
     parser.add_argument('--client-optimizer-target-momentum', type=float, default=.9)
     parser.add_argument('--client-optimizer-target-weight-decay', type=float, default=5e-5, help='inner weight decay')
-    parser.add_argument('--client-target-steps', type=int, default=50, help='number of inner steps')
-    parser.add_argument('--client-embed-batches', type=int, default=1, help='batches used to estimate rescaling')
+    parser.add_argument('--client-target-num-batches', type=int, default=50, help='number of inner steps')
+    parser.add_argument('--client-embed-num-batches', type=int, default=1, help='batches used to estimate rescaling')
 
-    # parser.add_argument("--optim", type=str, default='adam', choices=['adam', 'sgd'], help="learning rate")
+    parser.add_argument('--optimizer-hyper-embed-type', type=str, default='adam', choices=['adam', 'sgd'], help='learning rate')
+    parser.add_argument('--optimizer-hyper-lr', type=float, default=2e-4, help='learning rate')
+    parser.add_argument('--client-optimizer-embed-lr', type=float, default=2e-4, help='embedding learning rate')
+    parser.add_argument('--optimizer-weight-decay', type=float, default=1e-3, help="weight decay")
 
     ################################
     #       Model Prop args        #
@@ -51,12 +54,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--model-embed-type', type=str, default='cnn', choices=['none', 'cnn', 'mlp'], help='embed with')
     parser.add_argument('--model-embed-dim', type=int, default=-1, help='embedding dim')
     parser.add_argument('--model-embed-y', type=str2bool, default=True, help='embed y as well as x')
+    parser.add_argument('--model-hyper-hid-layers', type=int, default=3, help='num. hidden layers hypernetwork')
+    parser.add_argument('--model-hyper-hid-dim', type=int, default=100, help='hypernet hidden dim')
 
     # parser.add_argument("--embed-split", type=str, default='train', help="use train or test data to embed")
-    # parser.add_argument("--lr", type=float, default=2e-4, help="learning rate")
-    # parser.add_argument("--wd", type=float, default=1e-3, help="weight decay")
-    # parser.add_argument("--embed-lr", type=float, default=None, help="embedding learning rate")
-    # parser.add_argument("--hyper-hid", type=int, default=100, help="hypernet hidden dim")
     # parser.add_argument("--spec-norm", type=str2bool, default=False, help="hypernet hidden dim")
 
     args = parser.parse_args()

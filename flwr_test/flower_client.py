@@ -24,6 +24,7 @@ class FlowerClient(flwr.client.NumPyClient):
         self.trainloaders: List[DataLoader] = []
         self.valloaders: List[DataLoader] = []
         self.testloaders: List[DataLoader] = []
+        self.stage_memory: Dict = {}
 
     def get_properties(self, config: Config) -> Dict[str, Scalar]:
         num_train_users = config['num_train_clients']
@@ -65,7 +66,7 @@ class FlowerClient(flwr.client.NumPyClient):
         embed_model = config['model_embed_type']
         embed_dim = config['model_embed_dim']
         if embed_dim == -1:
-            embed_dim = int(1. + num_users * .25)  # auto embedding size
+            embed_dim = 1 + num_users // 4  # auto embedding size
         embed_y = config['model_embed_y']
         device = torch.device('cpu')
 
@@ -121,6 +122,19 @@ class FlowerClient(flwr.client.NumPyClient):
             state_dict = {k: torch.tensor(v) for k, v in zip(keys, vals)}
             net.load_state_dict(state_dict, strict=True)
 
+    def fit(self, parameters: List[np.ndarray], config: Config) -> Tuple[NDArrays, int, Dict[str, Scalar]]:
+        """Train the network on the training set."""
+        stage = config['stage']
+        match stage:
+            case 0:
+                return self.fit_0(parameters, config)
+            case 1:
+                return self.fit_1(parameters, config)
+            case 2:
+                return self.fit_0(parameters, config)
+            case 3:
+                return self.fit_3(parameters, config)
+
     def fit_0(self, parameters: List[np.ndarray], config: Config) -> Tuple[NDArrays, int, Dict[str, Scalar]]:
         device = torch.device(config['device'])
         self.tnet = self.tnet.to(device)
@@ -134,11 +148,11 @@ class FlowerClient(flwr.client.NumPyClient):
         )
         trainloader = self.trainloaders[int(config['cid'])]
         criterion = torch.nn.CrossEntropyLoss()
-        total_steps = config['client_target_steps']
+        num_batches = config['client_target_num_batches']
         i, length, train_loss, train_acc = 0, 0, 0., 0.
-        while i < total_steps:
+        while i < num_batches:
             for images, labels in trainloader:
-                if i >= total_steps:
+                if i >= num_batches:
                     break
                 i += 1
                 length += len(labels)
@@ -147,6 +161,7 @@ class FlowerClient(flwr.client.NumPyClient):
                 outputs = self.tnet(images)
                 loss = criterion(outputs, labels)
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.tnet.parameters(), 50.)
                 optimizer.step()
                 # Metrics
                 train_loss += loss.item()
@@ -165,37 +180,84 @@ class FlowerClient(flwr.client.NumPyClient):
         self.enet = self.enet.to(device)
         self.enet.device = device  # bug in PeFLL
         self.set_parameters(parameters)
-        trainloader = self.trainloaders[int(config['cid'])]
 
-        s = 1.
+        is_eval = config['is_eval']
+        if not is_eval:
+            self.enet.train()
+            dataloader = self.trainloaders[int(config['cid'])]
+        else:
+            self.enet.eval()
+            dataloader = self.valloaders[int(config['cid'])]
 
-        embed_batches = config['client_embed_batches']
-        num_batches = embed_batches if embed_batches != -1 else len(trainloader)
-        embed_dim = self.enet.fc3.out_features if isinstance(self.enet, CNNEmbed) else self.enet.fc.out_features
-        embedding = torch.zeros(embed_dim, device=device)
-        length = 0
-        for i, (images, labels) in enumerate(trainloader):
-            length += len(labels)
-            images, labels = images.to(device), labels.to(device)
-            embedding += self.enet((images, labels)).sum(dim=0)
-            if i >= num_batches - 1:
-                break
-        embedding /= length * s
+        num_batches = config['client_embed_num_batches']
+        num_batches = num_batches if num_batches != -1 else len(dataloader)
+        image_all, label_all = [], []
+        i = 0
+        while i < num_batches:
+            for images, labels in dataloader:
+                if i >= num_batches:
+                    break
+                i += 1
+                images, labels = images.to(device), labels.to(device)
+                image_all.append(images)
+                label_all.append(labels)
+        image_all = torch.cat(image_all, dim=0)
+        label_all = torch.cat(label_all, dim=0)
+
+        if not is_eval:
+            embedding = self.enet((image_all, label_all)).mean(dim=0)
+        else:
+            with torch.no_grad():
+                embedding = self.enet((image_all, label_all)).mean(dim=0)
+
+        # s = 1.
+        # embedding /= s
         embedding_ndarray = embedding.detach().cpu().numpy()
-        return [np.asarray([config['cid']]), embedding_ndarray], length, {}
 
-    def fit(self, parameters: List[np.ndarray], config: Config) -> Tuple[NDArrays, int, Dict[str, Scalar]]:
-        """Train the network on the training set."""
+        length = len(label_all)
+
+        self.stage_memory['embedding'] = embedding
+        self.stage_memory['length'] = length
+
+        return [embedding_ndarray], length, {}
+
+    def fit_3(self, parameters: List[np.ndarray], config: Config) -> Tuple[NDArrays, int, Dict[str, Scalar]]:
+        embedding = self.stage_memory['embedding']
+        grad = torch.tensor(parameters[0], device=embedding.device)
+        loss = (grad * embedding).sum()
+
+        lr = config['client_optimizer_embed_lr']
+        match config['optimizer_hyper_embed_type']:
+            case 'adam':
+                optimizer = torch.optim.Adam(self.enet.parameters(), lr=lr)
+            case 'sgd':
+                optimizer = torch.optim.SGD(
+                    self.enet.parameters(),
+                    lr=lr,
+                    momentum=.9,
+                    weight_decay=config['optimizer_weight_decay'],
+                )
+            case _:
+                raise NotImplementedError
+
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(list(self.enet.parameters()), 50.)
+        optimizer.step()
+
+        length = self.stage_memory['length']
+
+        # gc.collect()
+        return self.get_parameters({'net_name': 'enet'}), length, {'loss': float(loss)}
+
+    def evaluate(self, parameters: List[np.ndarray], config: Config) -> Tuple[float, int, Dict[str, Scalar]]:
+        """Evaluate the network on the entire test set."""
         stage = config['stage']
         match stage:
             case 0:
-                return self.fit_0(parameters, config)
+                return self.evaluate_0(parameters, config)
             case 1:
-                return self.fit_1(parameters, config)
-            case 2:
-                return self.fit_2(parameters, config)
-            case 3:
-                return self.fit_3(parameters, config)
+                return self.evaluate_1(parameters, config)
 
     def evaluate_0(self, parameters: List[np.ndarray], config: Config) -> Tuple[float, int, Dict[str, Scalar]]:
         device = torch.device(config['device'])
@@ -218,12 +280,40 @@ class FlowerClient(flwr.client.NumPyClient):
         gc.collect()
         return float(loss), len(valloader.dataset), {'accuracy': float(accuracy)}
 
-    def evaluate(self, parameters: List[np.ndarray], config: Config) -> Tuple[float, int, Dict[str, Scalar]]:
-        """Evaluate the network on the entire test set."""
-        stage = config['stage']
-        match stage:
-            case 0:
-                return self.evaluate_0(parameters, config)
+    def evaluate_1(self, parameters: List[np.ndarray], config: Config) -> Tuple[NDArrays, int, Dict[str, Scalar]]:
+        device = torch.device(config['device'])
+        self.enet = self.enet.to(device)
+        self.enet.device = device  # bug in PeFLL
+        self.set_parameters(parameters)
+        self.enet.eval()
+        valloader = self.valloaders[int(config['cid'])]
+        num_batches = config['client_embed_num_batches']
+        num_batches = num_batches if num_batches != -1 else len(trainloader)
+        image_all, label_all = [], []
+        i = 0
+        while i < num_batches:
+            for images, labels in valloader:
+                if i >= num_batches:
+                    break
+                i += 1
+                images, labels = images.to(device), labels.to(device)
+                image_all.append(images)
+                label_all.append(labels)
+        image_all = torch.cat(image_all, dim=0)
+        label_all = torch.cat(label_all, dim=0)
+        with torch.no_grad():
+            embedding = self.enet((image_all, label_all)).mean(dim=0)
+
+        # s = 1.
+        # embedding /= s
+        embedding_ndarray = embedding.detach().cpu().numpy()
+
+        length = len(label_all)
+
+        # self.stage_memory['embedding'] = embedding
+        # self.stage_memory['length'] = length
+
+        return [embedding_ndarray], length, {}
 
 
 def main():

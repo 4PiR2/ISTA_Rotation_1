@@ -33,7 +33,7 @@ import numpy as np
 import torch
 import wandb
 
-# from PeFLL.models import
+from PeFLL.models import CNNHyper
 
 from parse_args import parse_args
 from utils import init_wandb, finish_wandb
@@ -58,12 +58,18 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
             client_optimizer_target_lr: float = 2e-3,
             client_optimizer_target_momentum: float = .9,
             client_optimizer_target_weight_decay: float = 5e-5,
-            client_target_steps: int = 50,
-            client_embed_batches: int = 1,
+            client_target_num_batches: int = 50,
+            client_embed_num_batches: int = 1,
             model_num_kernels: int = 16,
             model_embed_type: str = 'none',
-            model_embed_model_dim: int = -1,
+            model_embed_dim: int = -1,
             model_embed_model_y: bool = True,
+            model_hyper_hid_layers: int = 3,
+            model_hyper_hid_dim: int = 100,
+            optimizer_hyper_embed_type: str = 'adam',
+            optimizer_hyper_lr: float = 2e-4,
+            client_optimizer_embed_lr: float = 2e-4,
+            optimizer_weight_decay: float = 1e-3,
             *args, **kwargs
     ):
         def weighted_average(metrics: List[Tuple[int, Metrics]]) -> Metrics:
@@ -94,8 +100,8 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
         self.client_optimizer_target_lr: float = client_optimizer_target_lr
         self.client_optimizer_target_momentum: float = client_optimizer_target_momentum
         self.client_optimizer_target_weight_decay: float = client_optimizer_target_weight_decay
-        self.client_target_steps: int = client_target_steps
-        self.client_embed_batches: int = client_embed_batches
+        self.client_target_num_batches: int = client_target_num_batches
+        self.client_embed_num_batches: int = client_embed_num_batches
         self.client_dataset_seed: int = client_dataset_seed
         self.client_dataset_data_name: str = client_dataset_data_name
         self.client_dataset_data_path: str = client_dataset_data_path
@@ -106,9 +112,33 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
         self.client_dataset_alpha_test: float = client_dataset_alpha_test
         self.model_num_kernels: int = model_num_kernels
         self.model_embed_type: str = model_embed_type
-        self.model_embed_dim: int = model_embed_model_dim
+        self.model_embed_dim: int = model_embed_dim
         self.model_embed_y: bool = model_embed_model_y
+        self.model_hyper_hid_layers: int = model_hyper_hid_layers
+        self.model_hyper_hid_dim: int = model_hyper_hid_dim
+        self.optimizer_hyper_embed_type: str = optimizer_hyper_embed_type
+        self.optimizer_hyper_lr: float = optimizer_hyper_lr
+        self.client_optimizer_embed_lr: float = client_optimizer_embed_lr
+        self.optimizer_weight_decay: float = optimizer_weight_decay
         self.stage_memory: Dict = {}
+
+        if model_embed_type != 'none':
+            if client_dataset_data_name == 'femnist':
+                client_dataset_num_clients = 3597
+            if model_embed_dim == -1:
+                model_embed_dim = 1 + client_dataset_num_clients // 4
+            self.hnet: torch.nn.Module = CNNHyper(
+                n_nodes=client_dataset_num_clients,
+                embedding_dim=model_embed_dim,
+                in_channels=3,
+                out_dim=10,
+                n_kernels=model_num_kernels,
+                hidden_dim=model_hyper_hid_dim,
+                spec_norm=False,
+                n_hidden=model_hyper_hid_layers,
+            )
+        else:
+            self.hnet: torch.nn.Module = torch.nn.Module()
 
     def initialize_parameters(self, client_manager: ClientManager) -> Optional[Parameters]:
         parameters = super().initialize_parameters(client_manager)
@@ -150,28 +180,28 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
             state_dict = {k: torch.tensor(v) for k, v in zip(keys, vals)}
             torch.save(state_dict, os.path.join(self.log_dir, 'checkpoints', f'model_{net_name}_round_{server_round}.pth'))
 
-    def _configure_common(self, client_config_pairs: List[Tuple[ClientProxy, Any]], client_manager: ClientManager) \
+    def _configure_common(self, clients: List[ClientProxy], client_manager: ClientManager) \
             -> List[Dict[str, Scalar]]:
         all_cids = sorted(list(client_manager.all().keys()))
 
         match self.mode:
             case 'multiplex':
-                cids = np.random.choice(np.arange(self.num_train_clients), len(client_config_pairs), replace=False).tolist()
+                cids = np.random.choice(np.arange(self.num_train_clients), len(clients), replace=False).tolist()
             case 'simulated':
-                cids = [int(client.cid) for client, _ in client_config_pairs]
+                cids = [int(client.cid) for client in clients]
             case 'distributed':
-                cids = [all_cids.index(client.cid) for client, _ in client_config_pairs]
+                cids = [all_cids.index(client.cid) for client in clients]
             case _:
-                cids = [None] * len(client_config_pairs)
+                cids = [None] * len(clients)
 
         num_gpus = torch.cuda.device_count()
         if num_gpus > 0:
             if self.mode == 'simulated':
-                devices = ['cuda'] * len(client_config_pairs)
+                devices = ['cuda'] * len(clients)
             else:
-                devices = [f'cuda:{all_cids.index(client.cid) % num_gpus}' for client, _ in client_config_pairs]
+                devices = [f'cuda:{all_cids.index(client.cid) % num_gpus}' for client, _ in clients]
         else:
-            devices = ['cpu'] * len(client_config_pairs)
+            devices = ['cpu'] * len(clients)
 
         configs = [{
                 'cid': cid,
@@ -203,72 +233,115 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
 
     def configure_fit(
             self, server_round: int, parameters: Parameters, client_manager: ClientManager,
-            config: Optional[Dict[str, Scalar]] = None
     ) -> List[Tuple[ClientProxy, FitIns]]:
-        stage = 0 if config is None or 'stage' not in config else config['stage']
-        match stage:
-            case 0:
-                client_config_pairs = super().configure_fit(server_round, parameters, client_manager)
-                common_configs = self._configure_common(client_config_pairs, client_manager)
-                stage_config = {
-                    'client_optimizer_target_lr': self.client_optimizer_target_lr,
-                    'client_optimizer_target_momentum': self.client_optimizer_target_momentum,
-                    'client_optimizer_target_weight_decay': self.client_optimizer_target_weight_decay,
-                    'client_target_steps': self.client_target_steps,
-                }
-            case 1:
-                client_config_pairs = super().configure_fit(server_round, parameters, client_manager)
-                common_configs = self._configure_common(client_config_pairs, client_manager)
-                self.stage_memory['client_config_pairs'] = client_config_pairs
-                self.stage_memory['common_configs'] = common_configs
-                stage_config = {
-                    'client_embed_batches': self.client_embed_batches,
-                }
-            case _:
-                client_config_pairs = []
-                common_configs = {}
-                stage_config = {}
+        raise NotImplementedError
 
-        client_config_pairs_updated: List[Tuple[ClientProxy, FitIns]] = []
-        for i, (client, fit_ins) in enumerate(client_config_pairs):
+    def configure_fit_0(
+            self, server_round: int, parameters: Parameters, client_manager: ClientManager,
+    ) -> List[Tuple[ClientProxy, FitIns]]:
+        # Sample clients
+        sample_size, min_num_clients = self.num_fit_clients(client_manager.num_available())
+        clients = client_manager.sample(num_clients=sample_size, min_num_clients=min_num_clients)
+        common_configs = self._configure_common(clients, client_manager)
+        client_config_pairs: List[Tuple[ClientProxy, FitIns]] = []
+        for i, client in enumerate(clients):
             conf = {
-                **fit_ins.config,
                 **common_configs[i],
-                'stage': stage,
-                **stage_config,
+                'stage': 0,
+                'client_optimizer_target_lr': self.client_optimizer_target_lr,
+                'client_optimizer_target_momentum': self.client_optimizer_target_momentum,
+                'client_optimizer_target_weight_decay': self.client_optimizer_target_weight_decay,
+                'client_target_num_batches': self.client_target_num_batches,
             }
-            client_config_pairs_updated.append((client, FitIns(fit_ins.parameters, conf)))
-        return client_config_pairs_updated
+            client_config_pairs.append((client, FitIns(parameters, conf)))
+        # Return client/config pairs
+        return client_config_pairs
+
+    def configure_fit_1(
+            self, parameters: Parameters, client_manager: ClientManager, is_eval: bool = False,
+    ) -> List[Tuple[ClientProxy, FitIns]]:
+        # Sample clients
+        sample_size, min_num_clients = self.num_fit_clients(client_manager.num_available())
+        clients = client_manager.sample(num_clients=sample_size, min_num_clients=min_num_clients)
+        common_configs = self._configure_common(clients, client_manager)
+        client_config_pairs: List[Tuple[ClientProxy, FitIns]] = []
+        for i, client in enumerate(clients):
+            conf = {
+                **common_configs[i],
+                'stage': 1,
+                'client_embed_num_batches': self.client_embed_num_batches,
+                'is_eval': is_eval,
+            }
+            client_config_pairs.append((client, FitIns(parameters, conf)))
+        self.stage_memory['clients'] = clients
+        self.stage_memory['common_configs'] = common_configs
+        # Return client/config pairs
+        return client_config_pairs
+
+    def configure_fit_2(
+            self, parameters: List[Parameters],
+    ) -> List[Tuple[ClientProxy, FitIns]]:
+        # Sample clients
+        clients = self.stage_memory['clients']
+        common_configs = self.stage_memory['common_configs']
+        client_config_pairs: List[Tuple[ClientProxy, FitIns]] = []
+        for i, client in enumerate(clients):
+            conf = {
+                **common_configs[i],
+                'stage': 2,
+                'client_optimizer_target_lr': self.client_optimizer_target_lr,
+                'client_optimizer_target_momentum': self.client_optimizer_target_momentum,
+                'client_optimizer_target_weight_decay': self.client_optimizer_target_weight_decay,
+                'client_target_num_batches': self.client_target_num_batches,
+            }
+            client_config_pairs.append((client, FitIns(parameters[i], conf)))
+        # Return client/config pairs
+        return client_config_pairs
+
+    def configure_fit_3(
+            self, parameters: List[Parameters],
+    ) -> List[Tuple[ClientProxy, FitIns]]:
+        # Sample clients
+        clients = self.stage_memory['clients']
+        common_configs = self.stage_memory['common_configs']
+        client_config_pairs: List[Tuple[ClientProxy, FitIns]] = []
+        for i, client in enumerate(clients):
+            conf = {
+                **common_configs[i],
+                'stage': 3,
+                'optimizer_hyper_embed_type': self.optimizer_hyper_embed_type,
+                'client_optimizer_embed_lr': self.client_optimizer_embed_lr,
+                'optimizer_weight_decay': self.optimizer_weight_decay,
+            }
+            client_config_pairs.append((client, FitIns(parameters[i], conf)))
+        # Return client/config pairs
+        return client_config_pairs
 
     def configure_evaluate(
             self, server_round: int, parameters: Parameters, client_manager: ClientManager,
-            config: Optional[Dict[str, Scalar]] = None
     ) -> List[Tuple[ClientProxy, EvaluateIns]]:
-        client_config_pairs = super().configure_evaluate(server_round, parameters, client_manager)
-        common_configs = self._configure_common(client_config_pairs, client_manager)
+        raise NotImplementedError
 
-        stage = 0 if config is None or 'stage' not in config else config['stage']
-        match stage:
-            case 0:
-                stage_config = {}
-            case _:
-                stage_config = {}
+    def configure_evaluate_0(
+            self, server_round: int, parameters: Parameters, client_manager: ClientManager,
+    ) -> List[Tuple[ClientProxy, EvaluateIns]]:
+        sample_size, min_num_clients = self.num_evaluation_clients(client_manager.num_available())
+        clients = client_manager.sample(num_clients=sample_size, min_num_clients=min_num_clients)
+        common_configs = self._configure_common(clients, client_manager)
+        client_config_pairs: List[Tuple[ClientProxy, EvaluateIns]] = []
 
-        client_config_pairs_updated: List[Tuple[ClientProxy, EvaluateIns]] = []
-        for i, (client, evaluate_ins) in enumerate(client_config_pairs):
+        for i, client in enumerate(clients):
             conf = {
-                **evaluate_ins.config,
                 **common_configs[i],
-                'stage': stage,
-                **stage_config,
+                'stage': 0,
             }
-            client_config_pairs_updated.append((client, EvaluateIns(evaluate_ins.parameters, conf)))
-        return client_config_pairs_updated
+            client_config_pairs.append((client, EvaluateIns(parameters, conf)))
+        return client_config_pairs
 
     def aggregate_fit(
             self, *args, **kwargs,
             # server_round: int,
-            # results: List[Tuple[flwr.server.client_proxy.ClientProxy, FitRes]],
+            # results: List[Tuple[ClientProxy, FitRes]],
             # failures: List[Union[Tuple[ClientProxy, FitRes], BaseException]],
     ) -> Tuple[Optional[Parameters], Dict[str, Scalar]]:
         raise NotImplementedError
@@ -276,7 +349,7 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
     def aggregate_fit_0(
             self,
             server_round: int,
-            results: List[Tuple[flwr.server.client_proxy.ClientProxy, FitRes]],
+            results: List[Tuple[ClientProxy, FitRes]],
             failures: List[Union[Tuple[ClientProxy, FitRes], BaseException]],
     ) -> Tuple[Optional[Parameters], Dict[str, Scalar]]:
         """Aggregate fit results using weighted average."""
@@ -312,27 +385,85 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
 
     def aggregate_fit_1(
             self,
-            results: List[Tuple[flwr.server.client_proxy.ClientProxy, FitRes]],
-    ) -> Tuple[Optional[Parameters], Dict[str, Scalar]]:
-        print(self.stage_memory['common_configs'])
-        # Convert results
-        weights_results = [
-            (parameters_to_ndarrays(fit_res.parameters), fit_res.num_examples)
-            for _, fit_res in results
-        ]
-        parameters_aggregated = ndarrays_to_parameters(
-            weights_results[1+len(weights_results[0]):] + aggregate(weights_results[:1+len(weights_results[0])])
+            results: List[Tuple[ClientProxy, FitRes]],
+            is_eval: bool = False,
+    ) -> Tuple[List[Optional[Parameters]], Dict[str, Scalar]]:
+        # align results order with clients order
+        clients: List[ClientProxy] = self.stage_memory['clients']
+        results = [results[i] for i in np.argsort([client.cid for client, _ in results])]
+        results = [results[j] for j in np.argsort(np.argsort([client.cid for client in clients]))]
+
+        device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+        self.hnet = self.hnet.to(device)
+
+        embeddings = torch.nn.Parameter(
+            torch.tensor([parameters_to_ndarrays(fit_res.parameters)[0] for _, fit_res in results], device=device)
         )
 
-        # Aggregate custom metrics if aggregation fn was provided
-        metrics_aggregated = {}
-        # if self.fit_metrics_aggregation_fn:
-        #     fit_metrics = [(res.num_examples, res.metrics) for _, res in results]
-        #     metrics_aggregated = self.fit_metrics_aggregation_fn(fit_metrics)
-        # elif server_round == 1:  # Only log this warning once
-        #     log(WARNING, "No fit_metrics_aggregation_fn provided")
+        if not is_eval:
+            self.hnet.train()
+            tnet_state_dicts = [self.hnet(embedding) for embedding in embeddings]
+        else:
+            self.hnet.eval()
+            with torch.no_grad():
+                tnet_state_dicts = [self.hnet(embedding) for embedding in embeddings]
 
-        return parameters_aggregated, metrics_aggregated
+        self.stage_memory['embeddings'] = embeddings
+        self.stage_memory['tnet_state_dicts'] = tnet_state_dicts
+
+        tnet_parameters = [ndarrays_to_parameters([
+            np.asarray(['tnet']),
+            np.asarray(list(tnet_state_dict.keys())),
+            *[v.detach().cpu().numpy() for v in tnet_state_dict.values()],
+        ]) for tnet_state_dict in tnet_state_dicts]
+
+        return tnet_parameters, {}
+
+    def aggregate_fit_2(
+            self,
+            results: List[Tuple[ClientProxy, FitRes]],
+    ) -> Tuple[List[Optional[Parameters]], Dict[str, Scalar]]:
+        # align results order with clients order
+        clients: List[ClientProxy] = self.stage_memory['clients']
+        results = [results[i] for i in np.argsort([client.cid for client, _ in results])]
+        results = [results[j] for j in np.argsort(np.argsort([client.cid for client in clients]))]
+
+        embeddings = self.stage_memory['embeddings']
+        tnet_state_dicts = self.stage_memory['tnet_state_dicts']
+        device = embeddings.device
+
+        result_values = [[
+            torch.tensor(v, device=device) for v in parameters_to_ndarrays(fit_res.parameters)[2:]
+        ] for _, fit_res in results]
+
+        losses = torch.stack([torch.stack([
+            ((o.detach() - v) * o).sum() for o, v in zip(state_dict.values(), result_value)
+        ], dim=0) for state_dict, result_value in zip(tnet_state_dicts, result_values)], dim=0)
+        losses = losses.sum(dim=-1)
+
+        weights = torch.tensor([fit_res.num_examples for _, fit_res in results], dtype=losses.dtype, device=device)
+        weights /= sum(weights)
+        loss = (losses * weights).sum()
+
+        match self.optimizer_hyper_embed_type:
+            case 'adam':
+                optimizer = torch.optim.Adam(self.hnet.parameters(), lr=self.optimizer_hyper_lr)
+            case 'sgd':
+                optimizer = torch.optim.SGD(
+                    self.hnet.parameters(),
+                    lr=self.optimizer_hyper_lr,
+                    momentum=.9,
+                    weight_decay=self.optimizer_weight_decay,
+                )
+            case _:
+                raise NotImplementedError
+
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.hnet.parameters(), 50.)
+        optimizer.step()
+
+        return [ndarrays_to_parameters([grad]) for grad in embeddings.grad.detach().cpu().numpy()], {}
 
     def aggregate_evaluate(
             self, *args, **kwargs,
@@ -423,6 +554,7 @@ class FlowerServer(flwr.server.Server):
                     # Not successful, client returned a result where the status code is not OK
                     failures.append(result)
         log(DEBUG, "execute_round %s received %s results and %s failures", server_round, len(results), len(failures))
+        assert not failures
         # Aggregate training results
         # aggregated_result: Tuple[Optional[Parameters], Dict[str, Scalar]] \
         #     = aggregate_fn(server_round, results, failures)
@@ -470,11 +602,10 @@ class FlowerServer(flwr.server.Server):
         for current_round in range(1 + self.strategy.init_round, 1 + num_rounds):
             # Train model and replace previous global model
             if self.strategy.model_embed_type == 'none':
-                fit_0_instructions = self.strategy.configure_fit(
+                fit_0_instructions = self.strategy.configure_fit_0(
                     server_round=current_round,
                     parameters=self.parameters,
                     client_manager=client_manager,
-                    config={'stage': 0}
                 )
                 fit_0_results, fit_0_failures = self.execute_round(
                     fn_name='fit',
@@ -482,7 +613,6 @@ class FlowerServer(flwr.server.Server):
                     server_round=current_round,
                     timeout=timeout,
                 )
-                assert not fit_0_failures
                 # Aggregate training results
                 parameters_prime, fit_metrics = self.strategy.aggregate_fit_0(
                     server_round=current_round,
@@ -496,18 +626,56 @@ class FlowerServer(flwr.server.Server):
                     )
 
             else:
-                fit_1_instructions = self.strategy.configure_fit(
-                    server_round=current_round,
+                fit_1_instructions = self.strategy.configure_fit_1(
+                    # server_round=current_round,
                     parameters=self.parameters,
                     client_manager=client_manager,
-                    config={'stage': 1}
                 )
-                fit_0_results, fit_0_failures = self.execute_round(
+                fit_1_results, _ = self.execute_round(
                     fn_name='fit',
                     client_instructions=fit_1_instructions,
                     server_round=current_round,
                     timeout=timeout,
                 )
+                # Aggregate training results
+                fit_1_agg_parameters, _ = self.strategy.aggregate_fit_1(
+                    # server_round=current_round,
+                    results=fit_1_results,
+                    # failures=fit_1_failures,
+                )
+                fit_2_instructions = self.strategy.configure_fit_2(
+                    # server_round=current_round,
+                    parameters=fit_1_agg_parameters,
+                    # client_manager=client_manager,
+                )
+                fit_2_results, _ = self.execute_round(
+                    fn_name='fit',
+                    client_instructions=fit_2_instructions,
+                    server_round=current_round,
+                    timeout=timeout,
+                )
+                fit_2_agg_parameters, _ = self.strategy.aggregate_fit_2(
+                    # server_round=current_round,
+                    results=fit_2_results,
+                    # failures=fit_2_failures,
+                )
+                fit_3_instructions = self.strategy.configure_fit_3(
+                    # server_round=current_round,
+                    parameters=fit_2_agg_parameters,
+                    # client_manager=client_manager,
+                )
+                fit_3_results, fit_3_failures = self.execute_round(
+                    fn_name='fit',
+                    client_instructions=fit_3_instructions,
+                    server_round=current_round,
+                    timeout=timeout,
+                )
+                fit_3_agg_parameters, _ = self.strategy.aggregate_fit_0(
+                    server_round=current_round,
+                    results=fit_3_results,
+                    failures=fit_3_failures,
+                )
+                self.parameters = fit_3_agg_parameters
 
             if current_round % self.strategy.eval_interval:
                 continue
@@ -534,11 +702,10 @@ class FlowerServer(flwr.server.Server):
 
             # Evaluate model on a sample of available clients
             if self.strategy.model_embed_type == 'none':
-                evaluate_0_instructions = self.strategy.configure_fit(
+                evaluate_0_instructions = self.strategy.configure_evaluate_0(
                     server_round=current_round,
                     parameters=self.parameters,
                     client_manager=client_manager,
-                    config={'stage': 0}
                 )
                 evaluate_0_results, evaluate_0_failures = self.execute_round(
                     fn_name='evaluate',
@@ -546,7 +713,49 @@ class FlowerServer(flwr.server.Server):
                     server_round=current_round,
                     timeout=timeout,
                 )
-                assert not evaluate_0_failures
+                loss_fed, evaluate_metrics_fed = self.strategy.aggregate_evaluate_0(
+                    server_round=current_round,
+                    results=evaluate_0_results,
+                    failures=evaluate_0_failures,
+                )
+                if loss_fed is not None:
+                    history.add_loss_distributed(
+                        server_round=current_round, loss=loss_fed
+                    )
+                    history.add_metrics_distributed(
+                        server_round=current_round, metrics=evaluate_metrics_fed
+                    )
+            else:
+                fit_1_instructions = self.strategy.configure_fit_1(
+                    # server_round=current_round,
+                    parameters=self.parameters,
+                    client_manager=client_manager,
+                    is_eval=True,
+                )
+                fit_1_results, _ = self.execute_round(
+                    fn_name='fit',
+                    client_instructions=fit_1_instructions,
+                    server_round=current_round,
+                    timeout=timeout,
+                )
+                # Aggregate training results
+                fit_1_agg_parameters, _ = self.strategy.aggregate_fit_1(
+                    # server_round=current_round,
+                    results=fit_1_results,
+                    # failures=fit_1_failures,
+                    is_eval=True,
+                )
+                evaluate_0_instructions = self.strategy.configure_evaluate_0(
+                    server_round=current_round,
+                    parameters=self.parameters,
+                    client_manager=client_manager,
+                )
+                evaluate_0_results, evaluate_0_failures = self.execute_round(
+                    fn_name='evaluate',
+                    client_instructions=evaluate_0_instructions,
+                    server_round=current_round,
+                    timeout=timeout,
+                )
                 loss_fed, evaluate_metrics_fed = self.strategy.aggregate_evaluate_0(
                     server_round=current_round,
                     results=evaluate_0_results,
@@ -593,8 +802,8 @@ def make_server(args: argparse.Namespace):
         client_optimizer_target_lr=args.client_optimizer_target_lr,
         client_optimizer_target_momentum=args.client_optimizer_target_momentum,
         client_optimizer_target_weight_decay=args.client_optimizer_target_weight_decay,
-        client_target_steps=args.client_target_steps,
-        client_embed_batches=args.client_embed_batches,
+        client_target_num_batches=args.client_target_num_batches,
+        client_embed_num_batches=args.client_embed_num_batches,
         client_dataset_seed=args.client_dataset_seed,
         client_dataset_data_name=args.client_dataset_data_name,
         client_dataset_data_path=args.client_dataset_data_path,
@@ -605,8 +814,14 @@ def make_server(args: argparse.Namespace):
         client_dataset_alpha_test=args.client_dataset_alpha_test,
         model_num_kernels=args.model_num_kernels,
         model_embed_type=args.model_embed_type,
-        model_embed_model_dim=args.model_embed_dim,
+        model_embed_dim=args.model_embed_dim,
         model_embed_model_y=args.model_embed_y,
+        model_hyper_hid_layers=args.model_hyper_hid_layers,
+        model_hyper_hid_dim=args.model_hyper_hid_dim,
+        optimizer_hyper_embed_type=args.optimizer_hyper_embed_type,
+        optimizer_hyper_lr=args.optimizer_hyper_lr,
+        client_optimizer_embed_lr=args.client_optimizer_embed_lr,
+        optimizer_weight_decay=args.optimizer_weight_decay,
     )
 
     server = FlowerServer(client_manager=SimpleClientManager(), strategy=strategy)
