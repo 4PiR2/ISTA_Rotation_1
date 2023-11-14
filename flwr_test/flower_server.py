@@ -138,7 +138,7 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
                 n_hidden=model_hyper_hid_layers,
             )
         else:
-            self.hnet: torch.nn.Module = torch.nn.Module()
+            self.hnet: Optional[torch.nn.Module] = None
 
     def initialize_parameters(self, client_manager: ClientManager) -> Optional[Parameters]:
         parameters = super().initialize_parameters(client_manager)
@@ -150,11 +150,17 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
             for net_name in header:
                 state_dict = torch.load(
                     os.path.join(self.log_dir, 'checkpoints', f'model_{net_name}_round_{self.init_round}.pth'),
-                    map_location=torch.device('cpu')
+                    map_location=torch.device('cpu'),
                 )
                 keys.append(np.asarray(list(state_dict.keys())))
                 vals.extend([val.detach().cpu().numpy() for val in state_dict.values()])
             parameters = ndarrays_to_parameters([np.asarray(header)] + keys + vals)
+            if self.hnet is not None:
+                state_dict = torch.load(
+                    os.path.join(self.log_dir, 'checkpoints', f'model_{"hnet"}_round_{self.init_round}.pth'),
+                    map_location=torch.device('cpu'),
+                )
+                self.hnet.load_state_dict(state_dict, strict=True)
         if parameters is not None:
             log(INFO, "Using initial parameters provided by strategy")
             return parameters
@@ -179,6 +185,8 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
                    1 + sum([len(k) for k in ndarrays[:1 + i]]): 1 + sum([len(k) for k in ndarrays[:2 + i]])]
             state_dict = {k: torch.tensor(v) for k, v in zip(keys, vals)}
             torch.save(state_dict, os.path.join(self.log_dir, 'checkpoints', f'model_{net_name}_round_{server_round}.pth'))
+        if self.hnet is not None:
+            torch.save(self.hnet.state_dict(), os.path.join(self.log_dir, 'checkpoints', f'model_{"hnet"}_round_{server_round}.pth'))
 
     def _configure_common(self, clients: List[ClientProxy], client_manager: ClientManager) \
             -> List[Dict[str, Scalar]]:
@@ -199,7 +207,7 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
             if self.mode == 'simulated':
                 devices = ['cuda'] * len(clients)
             else:
-                devices = [f'cuda:{all_cids.index(client.cid) % num_gpus}' for client, _ in clients]
+                devices = [f'cuda:{all_cids.index(client.cid) % num_gpus}' for client in clients]
         else:
             devices = ['cpu'] * len(clients)
 
@@ -397,7 +405,7 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
         self.hnet = self.hnet.to(device)
 
         embeddings = torch.nn.Parameter(
-            torch.tensor([parameters_to_ndarrays(fit_res.parameters)[0] for _, fit_res in results], device=device)
+            torch.tensor(np.asarray([parameters_to_ndarrays(fit_res.parameters)[0] for _, fit_res in results]), device=device)
         )
 
         if not is_eval:

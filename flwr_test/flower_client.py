@@ -40,10 +40,10 @@ class FlowerClient(flwr.client.NumPyClient):
         embedding_dir_path = None
 
         # Infer on range of OOD test clients
-        alpha_test_range = None
+        # alpha_test_range = None
         if alpha_test == -1.:
             assert partition_type == 'dirichlet'
-            alpha_test_range = np.arange(1., 11.) * .1
+            # alpha_test_range = np.arange(1., 11.) * .1
             alpha_test = alpha_train
 
         set_seed(seed)
@@ -124,8 +124,7 @@ class FlowerClient(flwr.client.NumPyClient):
 
     def fit(self, parameters: List[np.ndarray], config: Config) -> Tuple[NDArrays, int, Dict[str, Scalar]]:
         """Train the network on the training set."""
-        stage = config['stage']
-        match stage:
+        match config['stage']:
             case 0:
                 return self.fit_0(parameters, config)
             case 1:
@@ -134,6 +133,8 @@ class FlowerClient(flwr.client.NumPyClient):
                 return self.fit_0(parameters, config)
             case 3:
                 return self.fit_3(parameters, config)
+            case _:
+                raise NotImplementedError
 
     def fit_0(self, parameters: List[np.ndarray], config: Config) -> Tuple[NDArrays, int, Dict[str, Scalar]]:
         device = torch.device(config['device'])
@@ -146,20 +147,20 @@ class FlowerClient(flwr.client.NumPyClient):
             momentum=config['client_optimizer_target_momentum'],
             weight_decay=config['client_optimizer_target_weight_decay']
         )
-        trainloader = self.trainloaders[int(config['cid'])]
+        dataloader = self.trainloaders[int(config['cid'])]
         criterion = torch.nn.CrossEntropyLoss()
         num_batches = config['client_target_num_batches']
         i, length, train_loss, train_acc = 0, 0, 0., 0.
         while i < num_batches:
-            for images, labels in trainloader:
+            for images, labels in dataloader:
                 if i >= num_batches:
                     break
                 i += 1
                 length += len(labels)
-                optimizer.zero_grad()
                 images, labels = images.to(device), labels.to(device)
                 outputs = self.tnet(images)
                 loss = criterion(outputs, labels)
+                optimizer.zero_grad()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.tnet.parameters(), 50.)
                 optimizer.step()
@@ -171,7 +172,7 @@ class FlowerClient(flwr.client.NumPyClient):
 
         train_loss /= length
         train_acc /= length
-        gc.collect()
+        # gc.collect()
         return self.get_parameters({'net_name': 'tnet'}), length, {
             'loss': float(train_loss), 'accuracy': float(train_acc)}
 
@@ -210,8 +211,10 @@ class FlowerClient(flwr.client.NumPyClient):
             with torch.no_grad():
                 embedding = self.enet((image_all, label_all)).mean(dim=0)
 
-        # s = 1.
-        # embedding /= s
+        with torch.no_grad():
+            m, s = embedding.mean(), embedding.std(unbiased=False)
+        embedding = (embedding - m) / s
+
         embedding_ndarray = embedding.detach().cpu().numpy()
 
         length = len(label_all)
@@ -248,72 +251,37 @@ class FlowerClient(flwr.client.NumPyClient):
         length = self.stage_memory['length']
 
         # gc.collect()
-        return self.get_parameters({'net_name': 'enet'}), length, {'loss': float(loss)}
+        return self.get_parameters({'net_name': 'enet'}), length, {'loss_3': float(loss)}
 
     def evaluate(self, parameters: List[np.ndarray], config: Config) -> Tuple[float, int, Dict[str, Scalar]]:
         """Evaluate the network on the entire test set."""
-        stage = config['stage']
-        match stage:
+        match config['stage']:
             case 0:
                 return self.evaluate_0(parameters, config)
-            case 1:
-                return self.evaluate_1(parameters, config)
+            case _:
+                raise NotImplementedError
 
     def evaluate_0(self, parameters: List[np.ndarray], config: Config) -> Tuple[float, int, Dict[str, Scalar]]:
         device = torch.device(config['device'])
         self.tnet = self.tnet.to(device)
         self.set_parameters(parameters)
-        valloader = self.valloaders[int(config['cid'])]
+        dataloader = self.valloaders[int(config['cid'])]
         criterion = torch.nn.CrossEntropyLoss()
         correct, loss = 0, 0.
         self.tnet.eval()
         with torch.no_grad():
-            for images, labels in valloader:
+            for images, labels in dataloader:
                 images, labels = images.to(device), labels.to(device)
                 outputs = self.tnet(images)
                 loss += criterion(outputs, labels).item()
                 if labels.dim() > 1:
                     labels = labels.argmax(dim=-1)
                 correct += (outputs.argmax(dim=-1) == labels).sum().item()
-        loss /= len(valloader.dataset)
-        accuracy = correct / len(valloader.dataset)
-        gc.collect()
-        return float(loss), len(valloader.dataset), {'accuracy': float(accuracy)}
-
-    def evaluate_1(self, parameters: List[np.ndarray], config: Config) -> Tuple[NDArrays, int, Dict[str, Scalar]]:
-        device = torch.device(config['device'])
-        self.enet = self.enet.to(device)
-        self.enet.device = device  # bug in PeFLL
-        self.set_parameters(parameters)
-        self.enet.eval()
-        valloader = self.valloaders[int(config['cid'])]
-        num_batches = config['client_embed_num_batches']
-        num_batches = num_batches if num_batches != -1 else len(trainloader)
-        image_all, label_all = [], []
-        i = 0
-        while i < num_batches:
-            for images, labels in valloader:
-                if i >= num_batches:
-                    break
-                i += 1
-                images, labels = images.to(device), labels.to(device)
-                image_all.append(images)
-                label_all.append(labels)
-        image_all = torch.cat(image_all, dim=0)
-        label_all = torch.cat(label_all, dim=0)
-        with torch.no_grad():
-            embedding = self.enet((image_all, label_all)).mean(dim=0)
-
-        # s = 1.
-        # embedding /= s
-        embedding_ndarray = embedding.detach().cpu().numpy()
-
-        length = len(label_all)
-
-        # self.stage_memory['embedding'] = embedding
-        # self.stage_memory['length'] = length
-
-        return [embedding_ndarray], length, {}
+        length = len(dataloader.dataset)
+        loss /= length
+        accuracy = correct / length
+        # gc.collect()
+        return float(loss), length, {'accuracy': float(accuracy)}
 
 
 def main():
