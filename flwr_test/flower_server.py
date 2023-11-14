@@ -36,7 +36,7 @@ import wandb
 from PeFLL.models import CNNHyper
 
 from parse_args import parse_args
-from utils import init_wandb, finish_wandb
+from utils import init_wandb, finish_wandb, get_pefll_checkpoint
 
 
 class FlowerStrategy(flwr.server.strategy.FedAvg):
@@ -429,6 +429,7 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
 
     def aggregate_fit_2(
             self,
+            server_round: int,
             results: List[Tuple[ClientProxy, FitRes]],
     ) -> Tuple[List[Optional[Parameters]], Dict[str, Scalar]]:
         # align results order with clients order
@@ -471,6 +472,14 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
         torch.nn.utils.clip_grad_norm_(self.hnet.parameters(), 50.)
         optimizer.step()
 
+        # Aggregate custom metrics if aggregation fn was provided
+        metrics_aggregated = {}
+        if self.fit_metrics_aggregation_fn:
+            fit_metrics = [(res.num_examples, res.metrics) for _, res in results]
+            metrics_aggregated = self.fit_metrics_aggregation_fn(fit_metrics)
+        log(INFO, f"training: {metrics_aggregated}")
+        if wandb.run is not None:
+            wandb.log({'train': metrics_aggregated}, commit=False, step=server_round)
         return [ndarrays_to_parameters([grad]) for grad in embeddings.grad.detach().cpu().numpy()], {}
 
     def aggregate_evaluate(
@@ -663,7 +672,7 @@ class FlowerServer(flwr.server.Server):
                     timeout=timeout,
                 )
                 fit_2_agg_parameters, _ = self.strategy.aggregate_fit_2(
-                    # server_round=current_round,
+                    server_round=current_round,
                     results=fit_2_results,
                     # failures=fit_2_failures,
                 )

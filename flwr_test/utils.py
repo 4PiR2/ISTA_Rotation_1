@@ -3,6 +3,7 @@ import os
 import subprocess
 from typing import List, Optional
 
+import torch
 import wandb
 
 
@@ -61,3 +62,13 @@ def init_wandb(args: argparse.Namespace, experiment_name: Optional[str] = None):
 def finish_wandb():
     if wandb.run is not None:
         wandb.finish()  # Mark the run as finished
+
+
+def get_pefll_checkpoint():
+    state_dict = torch.load(os.path.join(
+        'PeFLL',
+        'saved_models',
+        'cifar10_100_nodes_90_trainnodes__partition_by_class_alphatrain_0.1_alphatest_0.1_seed_42',
+        'step_4999.ckpt',
+    ), map_location=torch.device('cpu'))
+    return state_dict
