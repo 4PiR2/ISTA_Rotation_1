@@ -331,19 +331,21 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
         raise NotImplementedError
 
     def configure_evaluate_0(
-            self, server_round: int, parameters: Parameters, client_manager: ClientManager,
+            self, server_round: int, parameters: Parameters | List[Parameters], client_manager: ClientManager,
     ) -> List[Tuple[ClientProxy, EvaluateIns]]:
         sample_size, min_num_clients = self.num_evaluation_clients(client_manager.num_available())
         clients = client_manager.sample(num_clients=sample_size, min_num_clients=min_num_clients)
         common_configs = self._configure_common(clients, client_manager)
         client_config_pairs: List[Tuple[ClientProxy, EvaluateIns]] = []
 
+        if isinstance(parameters, Parameters):
+            parameters = [parameters] * len(clients)
         for i, client in enumerate(clients):
             conf = {
                 **common_configs[i],
                 'stage': 0,
             }
-            client_config_pairs.append((client, EvaluateIns(parameters, conf)))
+            client_config_pairs.append((client, EvaluateIns(parameters[i], conf)))
         return client_config_pairs
 
     def aggregate_fit(
@@ -764,7 +766,7 @@ class FlowerServer(flwr.server.Server):
                 )
                 evaluate_0_instructions = self.strategy.configure_evaluate_0(
                     server_round=current_round,
-                    parameters=self.parameters,
+                    parameters=fit_1_agg_parameters,
                     client_manager=client_manager,
                 )
                 evaluate_0_results, evaluate_0_failures = self.execute_round(
