@@ -186,12 +186,15 @@ class FlowerClient(flwr.client.NumPyClient):
         if not is_eval:
             self.enet.train()
             dataloader = self.trainloaders[int(config['cid'])]
+            num_batches = config['client_embed_num_batches']
+            num_batches = num_batches if num_batches != -1 else len(dataloader)
         else:
             self.enet.eval()
-            dataloader = self.valloaders[int(config['cid'])]
+            dataloader = self.trainloaders[int(config['cid'])]
+            # TODO
+            # dataloader = self.valloaders[int(config['cid'])]
+            num_batches = len(dataloader)
 
-        num_batches = config['client_embed_num_batches']
-        num_batches = num_batches if num_batches != -1 else len(dataloader)
         image_all, label_all = [], []
         i = 0
         while i < num_batches:
