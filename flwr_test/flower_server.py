@@ -481,7 +481,7 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
             metrics_aggregated = self.fit_metrics_aggregation_fn(fit_metrics)
         log(INFO, f"training: {metrics_aggregated}")
         if wandb.run is not None:
-            wandb.log({'train': metrics_aggregated}, commit=False, step=server_round)
+            wandb.log({'train_2': metrics_aggregated}, commit=False, step=server_round)
         return [ndarrays_to_parameters([grad]) for grad in embeddings.grad.detach().cpu().numpy()], {}
 
     def aggregate_evaluate(

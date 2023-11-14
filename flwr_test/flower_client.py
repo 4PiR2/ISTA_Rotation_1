@@ -215,15 +215,20 @@ class FlowerClient(flwr.client.NumPyClient):
                 embedding = self.enet((image_all, label_all)).mean(dim=0)
 
         with torch.no_grad():
+            # TODO
             m, s = embedding.mean(), embedding.std(unbiased=False)
+        m, s = torch.tensor(0.25064870715141296), torch.tensor(1.0152097940444946)
+        embedding *= 16.
         embedding = (embedding - m) / s
 
         embedding_ndarray = embedding.detach().cpu().numpy()
 
         length = len(label_all)
+        label_count = label_all.sum(dim=0)
 
         self.stage_memory['embedding'] = embedding
         self.stage_memory['length'] = length
+        self.stage_memory['label_count'] = label_count
 
         return [embedding_ndarray], length, {}
 
@@ -269,7 +274,14 @@ class FlowerClient(flwr.client.NumPyClient):
         self.tnet = self.tnet.to(device)
         self.set_parameters(parameters)
         dataloader = self.valloaders[int(config['cid'])]
-        criterion = torch.nn.CrossEntropyLoss()
+        criterion = torch.nn.CrossEntropyLoss(reduction='sum')
+
+        # mask_absent_classes = True
+        # if mask_absent_classes:
+        #     classes_present = self.stage_memory['label_count'].bool().float()
+        # else:
+        #     classes_present = 1.
+
         correct, loss = 0, 0.
         self.tnet.eval()
         with torch.no_grad():

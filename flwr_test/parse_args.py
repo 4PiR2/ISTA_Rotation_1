@@ -20,6 +20,7 @@ def parse_args() -> argparse.Namespace:
 
     # parser.add_argument("--gpu", type=int, default=0, help="gpu device ID")
     # parser.add_argument("--mask-absent", type=str2bool, default=True, help="mask absent classes at eval")
+    # parser.add_argument("--embed-split", type=str, default='train', help="use train or test data to embed")
 
     #############################
     #       Dataset Args        #
@@ -56,9 +57,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--model-embed-y', type=str2bool, default=True, help='embed y as well as x')
     parser.add_argument('--model-hyper-hid-layers', type=int, default=3, help='num. hidden layers hypernetwork')
     parser.add_argument('--model-hyper-hid-dim', type=int, default=100, help='hypernet hidden dim')
-
-    # parser.add_argument("--embed-split", type=str, default='train', help="use train or test data to embed")
-    # parser.add_argument("--spec-norm", type=str2bool, default=False, help="hypernet hidden dim")
 
     args = parser.parse_args()
     return args
