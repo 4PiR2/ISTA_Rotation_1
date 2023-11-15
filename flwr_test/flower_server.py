@@ -348,6 +348,23 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
             client_config_pairs.append((client, EvaluateIns(parameters[i], conf)))
         return client_config_pairs
 
+    def configure_evaluate_1(
+            self, server_round: int, parameters: Parameters | List[Parameters], client_manager: ClientManager,
+    ) -> List[Tuple[ClientProxy, EvaluateIns]]:
+        clients = self.stage_memory['clients']
+        common_configs = self.stage_memory['common_configs']
+        client_config_pairs: List[Tuple[ClientProxy, EvaluateIns]] = []
+
+        if isinstance(parameters, Parameters):
+            parameters = [parameters] * len(clients)
+        for i, client in enumerate(clients):
+            conf = {
+                **common_configs[i],
+                'stage': 0,
+            }
+            client_config_pairs.append((client, EvaluateIns(parameters[i], conf)))
+        return client_config_pairs
+
     def aggregate_fit(
             self, *args, **kwargs,
             # server_round: int,
@@ -453,7 +470,7 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
         losses = losses.sum(dim=-1)
 
         weights = torch.tensor([fit_res.num_examples for _, fit_res in results], dtype=losses.dtype, device=device)
-        weights /= sum(weights)
+        weights /= weights.sum()
         loss = (losses * weights).sum()
 
         match self.optimizer_hyper_embed_type:
@@ -764,21 +781,21 @@ class FlowerServer(flwr.server.Server):
                     # failures=fit_1_failures,
                     is_eval=True,
                 )
-                evaluate_0_instructions = self.strategy.configure_evaluate_0(
+                evaluate_1_instructions = self.strategy.configure_evaluate_1(
                     server_round=current_round,
                     parameters=fit_1_agg_parameters,
                     client_manager=client_manager,
                 )
-                evaluate_0_results, evaluate_0_failures = self.execute_round(
+                evaluate_1_results, evaluate_1_failures = self.execute_round(
                     fn_name='evaluate',
-                    client_instructions=evaluate_0_instructions,
+                    client_instructions=evaluate_1_instructions,
                     server_round=current_round,
                     timeout=timeout,
                 )
                 loss_fed, evaluate_metrics_fed = self.strategy.aggregate_evaluate_0(
                     server_round=current_round,
-                    results=evaluate_0_results,
-                    failures=evaluate_0_failures,
+                    results=evaluate_1_results,
+                    failures=evaluate_1_failures,
                 )
                 if loss_fed is not None:
                     history.add_loss_distributed(
