@@ -124,13 +124,11 @@ class FlowerClient(flwr.client.NumPyClient):
     def fit(self, parameters: List[np.ndarray], config: Config) -> Tuple[NDArrays, int, Dict[str, Scalar]]:
         """Train the network on the training set."""
         match config['stage']:
-            case 0:
-                return self.fit_2(parameters, config)
-            case 1:
+            case 3 | 6:
                 return self.fit_1(parameters, config)
-            case 2:
+            case 1 | 4:
                 return self.fit_2(parameters, config)
-            case 3:
+            case 5:
                 return self.fit_3(parameters, config)
             case _:
                 raise NotImplementedError
@@ -175,11 +173,6 @@ class FlowerClient(flwr.client.NumPyClient):
         else:
             with torch.no_grad():
                 embedding = self.enet((image_all, label_all)).mean(dim=0)
-
-        # TODO
-        m, s = torch.tensor(0.25064870715141296), torch.tensor(1.0152097940444946)
-        embedding *= 16.
-        embedding = (embedding - m) / s
 
         embedding_ndarray = embedding.detach().cpu().numpy()
 
@@ -271,7 +264,7 @@ class FlowerClient(flwr.client.NumPyClient):
         dataloader = self.valloaders[int(config['cid'])]
         criterion = torch.nn.CrossEntropyLoss(reduction='sum')
 
-        if config['client_eval_mask_absent'] and config['stage']:
+        if config['client_eval_mask_absent'] and config['stage'] == 7:
             classes_present = self.stage_memory['label_count'].bool().float()
         else:
             classes_present = 1.
