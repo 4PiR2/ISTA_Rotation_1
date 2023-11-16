@@ -205,8 +205,7 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
         # Convert `List[np.ndarray]` to PyTorch`state_dict`
         for i, net_name in enumerate(ndarrays[0]):
             keys = ndarrays[1 + i]
-            vals = ndarrays[
-                   1 + sum([len(k) for k in ndarrays[:1 + i]]): 1 + sum([len(k) for k in ndarrays[:2 + i]])]
+            vals = ndarrays[1 + sum([len(k) for k in ndarrays[:1 + i]]): 1 + sum([len(k) for k in ndarrays[:2 + i]])]
             state_dict = {k: torch.tensor(v) for k, v in zip(keys, vals)}
             torch.save(
                 state_dict,

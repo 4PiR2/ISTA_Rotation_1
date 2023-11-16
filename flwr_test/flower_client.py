@@ -213,9 +213,9 @@ class FlowerClient(flwr.client.NumPyClient):
             num_batches = len(dataloader)
 
         if is_eval and config['client_eval_mask_absent'] and 'label_count' in self.stage_memory:
-            classes_present = self.stage_memory['label_count'].bool().float()
+            classes_present = self.stage_memory['label_count'].bool().log()
         else:
-            classes_present = 1.
+            classes_present = 0.
 
         i, length, total_loss, total_correct = 0, 0, 0., 0.
         while i < num_batches:
@@ -238,7 +238,7 @@ class FlowerClient(flwr.client.NumPyClient):
                     optimizer.step()
                 # Metrics
                 total_loss += loss.item() * len(labels)
-                predicts = (outputs * classes_present).argmax(dim=-1)
+                predicts = (outputs + classes_present).argmax(dim=-1)
                 if labels.dim() > 1:
                     labels = labels.argmax(dim=-1)
                 total_correct += (predicts == labels).sum().item()

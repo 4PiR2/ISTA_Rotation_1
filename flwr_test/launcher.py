@@ -15,27 +15,26 @@ def main():
     args = parse_args()
     mode = args.mode
     if mode == 'simulated':
-        init_wandb(args, f'experiment_{21}')
+        init_wandb(args, args.experiment_name)
         server = make_server(args)
         config = {
             'num_train_clients': server.strategy.num_train_clients,
-            'seed': server.strategy.client_data_seed,
-            'data_name': server.strategy.client_data_data_name,
-            'data_path': server.strategy.client_data_data_path,
-            'num_clients': server.strategy.client_data_num_clients,
-            'batch_size': server.strategy.client_data_batch_size,
-            'partition_type': server.strategy.client_data_partition_type,
-            'classes_per_user': server.strategy.client_data_classes_per_user,
+            'client_dataset_seed': server.strategy.client_data_seed,
+            'client_dataset_data_name': server.strategy.client_data_data_name,
+            'client_dataset_data_path': server.strategy.client_data_data_path,
+            'client_dataset_num_clients': server.strategy.client_data_num_clients,
+            'client_dataset_batch_size': server.strategy.client_data_batch_size,
+            'client_dataset_partition_type': server.strategy.client_data_partition_type,
+            'client_dataset_alpha_train': server.strategy.client_dataset_alpha_train,
+            'client_dataset_alpha_test': server.strategy.client_dataset_alpha_test,
+            'model_num_kernels': server.strategy.model_num_kernels,
+            'model_embed_type': server.strategy.model_embed_type,
+            'model_embed_dim': server.strategy.model_embed_dim,
+            'client_model_embed_y': server.strategy.client_model_embed_y,
         }
-        if server.strategy.client_data_alpha_train is not None:
-            config['alpha_train'] = server.strategy.client_data_alpha_train
-        if server.strategy.client_data_alpha_test is not None:
-            config['alpha_test'] = server.strategy.client_data_alpha_test
-        if server.strategy.client_data_embedding_dir_path is not None:
-            config['embedding_dir_path'] = server.strategy.client_data_embedding_dir_path
 
         def client_fn(cid: str) -> FlowerClient:
-            client = FlowerClient(cid)
+            client = FlowerClient()
             client.get_properties(config)
             return client
 
