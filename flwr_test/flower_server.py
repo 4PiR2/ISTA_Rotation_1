@@ -213,40 +213,6 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
         if self.hnet is not None:
             torch.save(self.hnet.state_dict(), os.path.join(self.log_dir, 'checkpoints', f'model_{"hnet"}_round_{server_round}.pth'))
 
-    def _configure_common(
-            self, clients: List[ClientProxy],
-            client_manager: ClientManager,
-            cids: Optional[List[int]] = None,
-    ) -> List[Dict[str, Scalar]]:
-        all_cids = sorted(list(client_manager.all().keys()))
-
-        if cids is None:
-            match self.mode:
-                case 'multiplex':
-                    cids = np.random.choice(np.arange(self.num_train_clients), len(clients), replace=False).tolist()
-                case 'simulated':
-                    cids = [int(client.cid) for client in clients]
-                case 'distributed':
-                    cids = [all_cids.index(client.cid) for client in clients]
-                case _:
-                    cids = [None] * len(clients)
-
-        num_gpus = torch.cuda.device_count()
-        if num_gpus > 0:
-            if self.mode == 'simulated':
-                devices = ['cuda'] * len(clients)
-            else:
-                devices = [f'cuda:{all_cids.index(client.cid) % num_gpus}' for client in clients]
-        else:
-            devices = ['cpu'] * len(clients)
-
-        configs = [{
-                'cid': cid,
-                'device': device,
-            } for cid, device in zip(cids, devices)
-        ]
-        return configs
-
     def configure_get_properties(self, client_manager: ClientManager) -> List[Tuple[ClientProxy, GetPropertiesIns]]:
         client_config_pairs_updated: List[Tuple[ClientProxy, GetPropertiesIns]] = []
         for i, (cid, client) in enumerate(client_manager.all().items()):
@@ -275,22 +241,63 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
             client_manager: ClientManager | None = None,
             stage: int = -1,
             cids: Optional[List[int]] = None,
-    ) -> List[Tuple[ClientProxy, FitIns | EvaluateIns]]:
+    ) -> List[Tuple[ClientProxy, FitIns | EvaluateIns | GetPropertiesIns]]:
         match stage:
-            case 1 | 3 | 6:
+            case 1 | 2 | 3 | 6:
                 # Sample clients
-                sample_size, min_num_clients = self.num_fit_clients(client_manager.num_available())
+                match stage:
+                    case 1 | 3 | 6:
+                        sample_size, min_num_clients = self.num_fit_clients(client_manager.num_available())
+                    case 2:
+                        sample_size, min_num_clients = self.num_evaluation_clients(client_manager.num_available())
+                    case _:
+                        raise NotImplementedError
+
+                if cids is not None:
+                    assert len(cids) <= sample_size
+                    sample_size = len(cids)
+
                 clients = client_manager.sample(num_clients=sample_size, min_num_clients=min_num_clients)
-                common_configs = self._configure_common(clients, client_manager, cids)
+
+                all_cids = sorted(list(client_manager.all().keys()))
+
+                if cids is None:
+                    match self.mode:
+                        case 'multiplex':
+                            cids = np.random.choice(np.arange(self.num_train_clients), len(clients),
+                                                    replace=False).tolist()
+                        case 'simulated':
+                            cids = [int(client.cid) for client in clients]
+                        case 'distributed':
+                            cids = [all_cids.index(client.cid) for client in clients]
+                        case _:
+                            cids = [None] * len(clients)
+
+                num_gpus = torch.cuda.device_count()
+                if num_gpus > 0:
+                    if self.mode == 'simulated':
+                        devices = ['cuda'] * len(clients)
+                    else:
+                        devices = [f'cuda:{all_cids.index(client.cid) % num_gpus}' for client in clients]
+                else:
+                    devices = ['cpu'] * len(clients)
+
+                common_configs = [{
+                    'cid': cid,
+                    'device': device,
+                } for cid, device in zip(cids, devices)]
+
                 parameters = [parameters] * len(clients)
-                if stage != 1:
-                    self.stage_memory['clients'] = clients
-                    self.stage_memory['common_configs'] = common_configs
-            case 2:
-                sample_size, min_num_clients = self.num_evaluation_clients(client_manager.num_available())
-                clients = client_manager.sample(num_clients=sample_size, min_num_clients=min_num_clients)
-                common_configs = self._configure_common(clients, client_manager, cids)
-                parameters = [parameters] * len(clients)
+
+                match stage:
+                    case 1 | 2:
+                        pass
+                    case 3 | 6:
+                        self.stage_memory['clients'] = clients
+                        self.stage_memory['common_configs'] = common_configs
+                    case _:
+                        raise NotImplementedError
+
             case 4 | 5 | 7:
                 clients = self.stage_memory['clients']
                 common_configs = self.stage_memory['common_configs']
@@ -351,7 +358,8 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
             parameters: Parameters | List[Parameters] | None,
             client_manager: ClientManager,
             stage: int = -1,
-    ) -> List[Tuple[ClientProxy, FitIns | EvaluateIns]]:
+            cids: Optional[List[int]] = None,
+    ) -> List[Tuple[ClientProxy, FitIns | EvaluateIns | GetPropertiesIns]]:
         return self.configure_fit(server_round, parameters, client_manager, stage)
 
     def aggregate_fit(
@@ -395,13 +403,16 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
                                  device=device)
                 )
 
-                if stage == 3:
-                    self.hnet.train()
-                    tnet_state_dicts = [self.hnet(embedding) for embedding in embeddings]
-                else:
-                    self.hnet.eval()
-                    with torch.no_grad():
+                match stage:
+                    case 3:
+                        self.hnet.train()
                         tnet_state_dicts = [self.hnet(embedding) for embedding in embeddings]
+                    case 6:
+                        self.hnet.eval()
+                        with torch.no_grad():
+                            tnet_state_dicts = [self.hnet(embedding) for embedding in embeddings]
+                    case _:
+                        raise NotImplementedError
 
                 self.stage_memory['embeddings'] = embeddings
                 self.stage_memory['tnet_state_dicts'] = tnet_state_dicts
@@ -490,6 +501,57 @@ class FlowerServer(flwr.server.Server):
         super().__init__(client_manager=client_manager, strategy=strategy)
         self.strategy: FlowerStrategy = self.strategy
 
+    def fit(self, num_rounds: int, timeout: Optional[float]) -> History:
+        """Run federated averaging for a number of rounds."""
+        history = History()
+        client_manager = self.client_manager()
+
+        log(INFO, 'Waiting until all clients are ready')
+        while client_manager.num_available() < self.strategy.min_available_clients:
+            pass
+
+        log(INFO, "Initializing clients")
+        get_properties_instructions = self.strategy.configure_get_properties(client_manager)
+        _, get_properties_failures = self.execute_round(
+            fn_name='get_properties',
+            client_instructions=get_properties_instructions,
+            server_round=0,
+            timeout=timeout,
+        )
+        assert not get_properties_failures
+
+        # Initialize parameters
+        log(INFO, "Initializing global parameters")
+        self.parameters = self.strategy.initialize_parameters(client_manager=client_manager)
+        # log(INFO, "Evaluating initial parameters")
+        # res = self.strategy.evaluate(0, parameters=self.parameters)
+        # if res is not None:
+        #     log(
+        #         INFO,
+        #         "initial parameters (loss, other metrics): %s, %s",
+        #         res[0],
+        #         res[1],
+        #     )
+        #     history.add_loss_centralized(server_round=0, loss=res[0])
+        #     history.add_metrics_centralized(server_round=0, metrics=res[1])
+
+        # Run federated learning for num_rounds
+        log(INFO, "FL starting")
+        start_time = timeit.default_timer()
+
+        for server_round in range(1 + self.strategy.init_round, 1 + num_rounds):
+            self.fit_round(server_round, timeout)
+            if server_round % self.strategy.eval_interval:
+                continue
+            self.strategy.save_model(self.parameters, server_round)  # save model checkpoint
+            self.evaluate_round(server_round, timeout)
+
+        # Bookkeeping
+        end_time = timeit.default_timer()
+        elapsed = end_time - start_time
+        log(INFO, "FL finished in %s", elapsed)
+        return history
+
     def execute_round(
             self,
             fn_name: str,
@@ -502,12 +564,6 @@ class FlowerServer(flwr.server.Server):
         List[Union[Tuple[ClientProxy, FitRes], BaseException]],
     ]]:
         """Perform a single round of communication."""
-        # Get clients and their respective instructions from strategy
-        # client_instructions = client_instructions_fn(
-        #     server_round=server_round,
-        #     parameters=self.parameters,
-        #     client_manager=self._client_manager,
-        # )
         if not client_instructions:
             log(INFO, "execute_round %s: no clients selected, cancel", server_round)
             return None
@@ -554,244 +610,174 @@ class FlowerServer(flwr.server.Server):
                     failures.append(result)
         log(DEBUG, "execute_round %s received %s results and %s failures", server_round, len(results), len(failures))
         assert not failures
-        # Aggregate training results
-        # aggregated_result: Tuple[Optional[Parameters], Dict[str, Scalar]] \
-        #     = aggregate_fn(server_round, results, failures)
-        # parameters_aggregated, metrics_aggregated = aggregated_result
         return results, failures
 
-    def fit(self, num_rounds: int, timeout: Optional[float]) -> History:
-        """Run federated averaging for a number of rounds."""
-        history = History()
+    def fit_round(self, server_round: int, timeout: Optional[float]) -> Optional[Dict[str, Scalar]]:
+        """Perform a single round of federated averaging."""
+        # Train model and replace previous global model
         client_manager = self.client_manager()
+        # Get clients and their respective instructions from strategy
+        if self.strategy.model_embed_type == 'none':
+            fit_0_instructions = self.strategy.configure_fit(
+                server_round=server_round,
+                parameters=self.parameters,
+                client_manager=client_manager,
+                stage=1,
+            )
+            # Collect `fit` results from all clients participating in this round
+            fit_0_results, fit_0_failures = self.execute_round(
+                fn_name='fit',
+                client_instructions=fit_0_instructions,
+                server_round=server_round,
+                timeout=timeout,
+            )
+            # Aggregate training results
+            parameters_prime, fit_metrics = self.strategy.aggregate_fit(
+                server_round=server_round,
+                results=fit_0_results,
+                failures=fit_0_failures,
+                stage=1,
+            )
+            if parameters_prime:
+                self.parameters = parameters_prime
+                # history.add_metrics_distributed_fit(
+                #     server_round=server_round, metrics=fit_metrics
+                # )
+        else:
+            fit_1_instructions = self.strategy.configure_fit(
+                server_round=server_round,
+                parameters=self.parameters,
+                client_manager=client_manager,
+                stage=3,
+            )
+            fit_1_results, fit_1_failures = self.execute_round(
+                fn_name='fit',
+                client_instructions=fit_1_instructions,
+                server_round=server_round,
+                timeout=timeout,
+            )
+            # Aggregate training results
+            fit_1_agg_parameters, _ = self.strategy.aggregate_fit(
+                server_round=server_round,
+                results=fit_1_results,
+                failures=fit_1_failures,
+                stage=3,
+            )
+            fit_2_instructions = self.strategy.configure_fit(
+                server_round=server_round,
+                parameters=fit_1_agg_parameters,
+                client_manager=client_manager,
+                stage=4,
+            )
+            fit_2_results, fit_2_failures = self.execute_round(
+                fn_name='fit',
+                client_instructions=fit_2_instructions,
+                server_round=server_round,
+                timeout=timeout,
+            )
+            fit_2_agg_parameters, _ = self.strategy.aggregate_fit(
+                server_round=server_round,
+                results=fit_2_results,
+                failures=fit_2_failures,
+                stage=4,
+            )
+            fit_3_instructions = self.strategy.configure_fit(
+                server_round=server_round,
+                parameters=fit_2_agg_parameters,
+                client_manager=client_manager,
+                stage=5,
+            )
+            fit_3_results, fit_3_failures = self.execute_round(
+                fn_name='fit',
+                client_instructions=fit_3_instructions,
+                server_round=server_round,
+                timeout=timeout,
+            )
+            fit_3_agg_parameters, _ = self.strategy.aggregate_fit(
+                server_round=server_round,
+                results=fit_3_results,
+                failures=fit_3_failures,
+                stage=5,
+            )
+            self.parameters = fit_3_agg_parameters
 
-        log(INFO, 'Waiting until all clients are ready')
-        while client_manager.num_available() < self.strategy.min_available_clients:
-            pass
+        return None
 
-        log(INFO, "Initializing clients")
-        get_properties_instructions = self.strategy.configure_get_properties(client_manager)
-        _, get_properties_failures = self.execute_round(
-            fn_name='get_properties',
-            client_instructions=get_properties_instructions,
-            server_round=0,
-            timeout=timeout,
-        )
-        assert not get_properties_failures
-
-        # Initialize parameters
-        log(INFO, "Initializing global parameters")
-        self.parameters = self.strategy.initialize_parameters(client_manager=client_manager)
-        # log(INFO, "Evaluating initial parameters")
-        # res = self.strategy.evaluate(0, parameters=self.parameters)
-        # if res is not None:
-        #     log(
-        #         INFO,
-        #         "initial parameters (loss, other metrics): %s, %s",
-        #         res[0],
-        #         res[1],
-        #     )
-        #     history.add_loss_centralized(server_round=0, loss=res[0])
-        #     history.add_metrics_centralized(server_round=0, metrics=res[1])
-
-        # Run federated learning for num_rounds
-        log(INFO, "FL starting")
-        start_time = timeit.default_timer()
-
-        for current_round in range(1 + self.strategy.init_round, 1 + num_rounds):
-            # Train model and replace previous global model
-            if self.strategy.model_embed_type == 'none':
-                fit_0_instructions = self.strategy.configure_fit(
-                    server_round=current_round,
-                    parameters=self.parameters,
-                    client_manager=client_manager,
-                    stage=1,
-                )
-                fit_0_results, fit_0_failures = self.execute_round(
-                    fn_name='fit',
-                    client_instructions=fit_0_instructions,
-                    server_round=current_round,
-                    timeout=timeout,
-                )
-                # Aggregate training results
-                parameters_prime, fit_metrics = self.strategy.aggregate_fit(
-                    server_round=current_round,
-                    results=fit_0_results,
-                    failures=fit_0_failures,
-                    stage=1,
-                )
-                if parameters_prime:
-                    self.parameters = parameters_prime
-                    history.add_metrics_distributed_fit(
-                        server_round=current_round, metrics=fit_metrics
-                    )
-
-            else:
-                fit_1_instructions = self.strategy.configure_fit(
-                    server_round=current_round,
-                    parameters=self.parameters,
-                    client_manager=client_manager,
-                    stage=3,
-                )
-                fit_1_results, fit_1_failures = self.execute_round(
-                    fn_name='fit',
-                    client_instructions=fit_1_instructions,
-                    server_round=current_round,
-                    timeout=timeout,
-                )
-                # Aggregate training results
-                fit_1_agg_parameters, _ = self.strategy.aggregate_fit(
-                    server_round=current_round,
-                    results=fit_1_results,
-                    failures=fit_1_failures,
-                    stage=3,
-                )
-                fit_2_instructions = self.strategy.configure_fit(
-                    server_round=current_round,
-                    parameters=fit_1_agg_parameters,
-                    client_manager=client_manager,
-                    stage=4,
-                )
-                fit_2_results, fit_2_failures = self.execute_round(
-                    fn_name='fit',
-                    client_instructions=fit_2_instructions,
-                    server_round=current_round,
-                    timeout=timeout,
-                )
-                fit_2_agg_parameters, _ = self.strategy.aggregate_fit(
-                    server_round=current_round,
-                    results=fit_2_results,
-                    failures=fit_2_failures,
-                    stage=4,
-                )
-                fit_3_instructions = self.strategy.configure_fit(
-                    server_round=current_round,
-                    parameters=fit_2_agg_parameters,
-                    client_manager=client_manager,
-                    stage=5,
-                )
-                fit_3_results, fit_3_failures = self.execute_round(
-                    fn_name='fit',
-                    client_instructions=fit_3_instructions,
-                    server_round=current_round,
-                    timeout=timeout,
-                )
-                fit_3_agg_parameters, _ = self.strategy.aggregate_fit(
-                    server_round=current_round,
-                    results=fit_3_results,
-                    failures=fit_3_failures,
-                    stage=5,
-                )
-                self.parameters = fit_3_agg_parameters
-
-            if current_round % self.strategy.eval_interval:
-                continue
-
-            # save model checkpoint
-            self.strategy.save_model(self.parameters, current_round)
-
-            # Evaluate model using strategy implementation
-            # res_cen = self.strategy.evaluate(current_round, parameters=self.parameters)
-            # if res_cen is not None:
-            #     loss_cen, metrics_cen = res_cen
-            #     log(
-            #         INFO,
-            #         "fit progress: (%s, %s, %s, %s)",
-            #         current_round,
-            #         loss_cen,
-            #         metrics_cen,
-            #         timeit.default_timer() - start_time,
-            #     )
-            #     history.add_loss_centralized(server_round=current_round, loss=loss_cen)
-            #     history.add_metrics_centralized(
-            #         server_round=current_round, metrics=metrics_cen
-            #     )
-
+    def evaluate_round(self, server_round: int, timeout: Optional[float]) -> Optional[Dict[str, Scalar]]:
+        """Validate current global model on a number of clients."""
+        client_manager = self.client_manager()
+        metrics = []
+        for i in range(0, self.strategy.num_train_clients, self.strategy.num_available_clients):
+            cids = list(range(i, min(i + self.strategy.num_available_clients, self.strategy.num_train_clients)))
             # Evaluate model on a sample of available clients
             if self.strategy.model_embed_type == 'none':
+                # Get clients and their respective instructions from strategy
                 evaluate_0_instructions = self.strategy.configure_evaluate(
-                    server_round=current_round,
+                    server_round=server_round,
                     parameters=self.parameters,
                     client_manager=client_manager,
                     stage=2,
+                    cids=cids,
                 )
                 evaluate_0_results, evaluate_0_failures = self.execute_round(
                     fn_name='evaluate',
                     client_instructions=evaluate_0_instructions,
-                    server_round=current_round,
+                    server_round=server_round,
                     timeout=timeout,
                 )
                 loss_fed, evaluate_metrics_fed = self.strategy.aggregate_evaluate(
-                    server_round=current_round,
+                    server_round=server_round,
                     results=evaluate_0_results,
                     failures=evaluate_0_failures,
                 )
-                if loss_fed is not None:
-                    history.add_loss_distributed(
-                        server_round=current_round, loss=loss_fed
-                    )
-                    history.add_metrics_distributed(
-                        server_round=current_round, metrics=evaluate_metrics_fed
-                    )
             else:
-                accs = []
-                for i in range(0, self.strategy.num_train_clients, self.strategy.num_available_clients):
-                    fit_1_instructions = self.strategy.configure_fit(
-                        server_round=current_round,
-                        parameters=self.parameters,
-                        client_manager=client_manager,
-                        stage=6,
-                        cids=list(range(i, i + self.strategy.num_available_clients))
-                    )
-                    fit_1_results, fit_1_failures = self.execute_round(
-                        fn_name='fit',
-                        client_instructions=fit_1_instructions,
-                        server_round=current_round,
-                        timeout=timeout,
-                    )
-                    # Aggregate training results
-                    fit_1_agg_parameters, _ = self.strategy.aggregate_fit(
-                        server_round=current_round,
-                        results=fit_1_results,
-                        failures=fit_1_failures,
-                        stage=6,
-                    )
-                    evaluate_2_instructions = self.strategy.configure_evaluate(
-                        server_round=current_round,
-                        parameters=fit_1_agg_parameters,
-                        client_manager=client_manager,
-                        stage=7,
-                    )
-                    evaluate_2_results, evaluate_2_failures = self.execute_round(
-                        fn_name='evaluate',
-                        client_instructions=evaluate_2_instructions,
-                        server_round=current_round,
-                        timeout=timeout,
-                    )
-                    loss_fed, evaluate_metrics_fed = self.strategy.aggregate_evaluate(
-                        server_round=current_round,
-                        results=evaluate_2_results,
-                        failures=evaluate_2_failures,
-                    )
-                    accs.append(evaluate_metrics_fed['accuracy'])
-                metrics_aggregated = {'accuracy': np.mean(accs)}
-                log(INFO, f'evaluation: {metrics_aggregated}')
-                if wandb.run is not None:
-                    wandb.log({'val': metrics_aggregated}, commit=True, step=current_round)
+                fit_1_instructions = self.strategy.configure_fit(
+                    server_round=server_round,
+                    parameters=self.parameters,
+                    client_manager=client_manager,
+                    stage=6,
+                    cids=cids,
+                )
+                fit_1_results, fit_1_failures = self.execute_round(
+                    fn_name='fit',
+                    client_instructions=fit_1_instructions,
+                    server_round=server_round,
+                    timeout=timeout,
+                )
+                # Aggregate training results
+                fit_1_agg_parameters, _ = self.strategy.aggregate_fit(
+                    server_round=server_round,
+                    results=fit_1_results,
+                    failures=fit_1_failures,
+                    stage=6,
+                )
+                evaluate_2_instructions = self.strategy.configure_evaluate(
+                    server_round=server_round,
+                    parameters=fit_1_agg_parameters,
+                    client_manager=client_manager,
+                    stage=7,
+                )
+                evaluate_2_results, evaluate_2_failures = self.execute_round(
+                    fn_name='evaluate',
+                    client_instructions=evaluate_2_instructions,
+                    server_round=server_round,
+                    timeout=timeout,
+                )
+                loss_fed, evaluate_metrics_fed = self.strategy.aggregate_evaluate(
+                    server_round=server_round,
+                    results=evaluate_2_results,
+                    failures=evaluate_2_failures,
+                )
 
-                if loss_fed is not None:
-                    history.add_loss_distributed(
-                        server_round=current_round, loss=loss_fed
-                    )
-                    history.add_metrics_distributed(
-                        server_round=current_round, metrics=evaluate_metrics_fed
-                    )
+            metrics.append((len(cids), evaluate_metrics_fed))
 
-        # Bookkeeping
-        end_time = timeit.default_timer()
-        elapsed = end_time - start_time
-        log(INFO, "FL finished in %s", elapsed)
-        return history
+        metrics_aggregated = self.strategy.evaluate_metrics_aggregation_fn(metrics)
+        log(INFO, f'evaluation: {metrics_aggregated}')
+
+        if wandb.run is not None:
+            wandb.log({'val': metrics_aggregated}, commit=True, step=server_round)
+
+        return metrics_aggregated
 
 
 def make_server(args: argparse.Namespace):

@@ -288,7 +288,7 @@ class FlowerClient(flwr.client.NumPyClient):
         loss /= length
         accuracy = correct / length
         # gc.collect()
-        return float(loss), length, {'accuracy': float(accuracy)}
+        return float(loss), length, {'accuracy': float(accuracy), 'loss': float(loss)}
 
 
 def main():
