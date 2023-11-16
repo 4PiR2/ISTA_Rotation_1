@@ -1,4 +1,5 @@
 import argparse
+from typing import Optional
 
 from PeFLL.utils import str2bool
 
@@ -13,10 +14,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--server-address', type=str, default=f'127.0.0.1:{18080}')
     parser.add_argument('--num-train-clients', type=int, default=int(100 * .9), help='number of nodes used in training')  # femnist: recommend int(3597 * .9)
     parser.add_argument('--num-step-clients', type=int, default=8, help='nodes to sample per round')
-    parser.add_argument('--num-rounds', type=int, default=1000)  # 5000
-    parser.add_argument('--eval-interval', type=int, default=10, help='eval every X selected epochs')
+    parser.add_argument('--num-rounds', type=int, default=5000)  # 5000
+    parser.add_argument('--eval-interval', type=int, default=100, help='eval every X selected epochs')
     parser.add_argument('--init-round', type=int, default=0)
     parser.add_argument('--log-dir', type=str, default='./outputs', help='dir path for output file')
+    parser.add_argument('--experiment-name', type=Optional[str], default=None, help='experiment name')
 
     #############################
     #       Dataset Args        #

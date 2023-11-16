@@ -58,8 +58,6 @@ class FlowerClient(flwr.client.NumPyClient):
             alpha_test=alpha_test,
             embedding_dir_path=embedding_dir_path,
         )
-        # if 'seed2' in config:
-        #     set_seed(config['seed2'])
 
         n_kernels = config['model_num_kernels']
         embed_model = config['model_embed_type']
@@ -126,7 +124,7 @@ class FlowerClient(flwr.client.NumPyClient):
         match config['stage']:
             case 3 | 6:
                 return self.fit_1(parameters, config)
-            case 1 | 4:
+            case 1 | 2 | 4 | 7:
                 return self.fit_2(parameters, config)
             case 5:
                 return self.fit_3(parameters, config)
@@ -185,25 +183,41 @@ class FlowerClient(flwr.client.NumPyClient):
 
         self.stage_memory['embedding'] = embedding
         self.stage_memory['length'] = length
-        self.stage_memory['label_count'] = label_count  # TODO
+        self.stage_memory['label_count'] = label_count
 
+        # gc.collect()
         return [embedding_ndarray], length, {}
 
     def fit_2(self, parameters: List[np.ndarray], config: Config) -> Tuple[NDArrays, int, Dict[str, Scalar]]:
         device = torch.device(config['device'])
         self.tnet = self.tnet.to(device)
         self.set_parameters(parameters)
-        self.tnet.train()
-        optimizer = torch.optim.SGD(
-            self.tnet.parameters(),
-            lr=config['client_optimizer_target_lr'],
-            momentum=config['client_optimizer_target_momentum'],
-            weight_decay=config['client_optimizer_target_weight_decay']
-        )
-        dataloader = self.trainloaders[int(config['cid'])]
+
+        cid = int(config['cid'])
+        is_eval = config['is_eval']
         criterion = torch.nn.CrossEntropyLoss()
-        num_batches = config['client_target_num_batches']
-        i, length, train_loss, train_acc = 0, 0, 0., 0.
+
+        if not is_eval:
+            self.tnet.train()
+            optimizer = torch.optim.SGD(
+                self.tnet.parameters(),
+                lr=config['client_optimizer_target_lr'],
+                momentum=config['client_optimizer_target_momentum'],
+                weight_decay=config['client_optimizer_target_weight_decay']
+            )
+            dataloader = self.trainloaders[cid]
+            num_batches = config['client_target_num_batches']
+        else:
+            self.tnet.eval()
+            dataloader = self.valloaders[cid]
+            num_batches = len(dataloader)
+
+        if is_eval and config['client_eval_mask_absent'] and 'label_count' in self.stage_memory:
+            classes_present = self.stage_memory['label_count'].bool().float()
+        else:
+            classes_present = 1.
+
+        i, length, total_loss, total_correct = 0, 0, 0., 0.
         while i < num_batches:
             for images, labels in dataloader:
                 if i >= num_batches:
@@ -211,24 +225,36 @@ class FlowerClient(flwr.client.NumPyClient):
                 i += 1
                 length += len(labels)
                 images, labels = images.to(device), labels.to(device)
-                outputs = self.tnet(images)
+                if not is_eval:
+                    outputs = self.tnet(images)
+                else:
+                    with torch.no_grad():
+                        outputs = self.tnet(images)
                 loss = criterion(outputs, labels)
-                optimizer.zero_grad()
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.tnet.parameters(), 50.)
-                optimizer.step()
+                if not is_eval:
+                    optimizer.zero_grad()
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(self.tnet.parameters(), 50.)
+                    optimizer.step()
                 # Metrics
-                train_loss += loss.item()
+                total_loss += loss.item() * len(labels)
+                predicts = (outputs * classes_present).argmax(dim=-1)
                 if labels.dim() > 1:
                     labels = labels.argmax(dim=-1)
-                train_acc += (outputs.argmax(dim=-1) == labels).sum().item()
+                total_correct += (predicts == labels).sum().item()
 
-        train_loss /= length
-        train_acc /= length
+        total_loss /= length
+        total_correct /= length
+
+        if not is_eval:
+            parameters = self.get_parameters({'net_name': 'tnet'})
+        else:
+            parameters = []
+
         # gc.collect()
-        return self.get_parameters({'net_name': 'tnet'}), length, {
-            'loss_2': float(train_loss),
-            'accuracy_2': float(train_acc),
+        return parameters, length, {
+            'loss_2': float(total_loss),
+            'accuracy_2': float(total_correct),
         }
 
     def fit_3(self, parameters: List[np.ndarray], config: Config) -> Tuple[NDArrays, int, Dict[str, Scalar]]:
@@ -258,37 +284,13 @@ class FlowerClient(flwr.client.NumPyClient):
         length = self.stage_memory['length']
 
         # gc.collect()
-        return self.get_parameters({'net_name': 'enet'}), length, {'loss_3': float(loss)}
+        return self.get_parameters({'net_name': 'enet'}), length, {
+            'loss_3': float(loss)
+        }
 
     def evaluate(self, parameters: List[np.ndarray], config: Config) -> Tuple[float, int, Dict[str, Scalar]]:
         """Evaluate the network on the entire test set."""
-        device = torch.device(config['device'])
-        self.tnet = self.tnet.to(device)
-        self.set_parameters(parameters)
-        dataloader = self.valloaders[int(config['cid'])]
-        criterion = torch.nn.CrossEntropyLoss(reduction='sum')
-
-        if config['client_eval_mask_absent'] and config['stage'] == 7:
-            classes_present = self.stage_memory['label_count'].bool().float()
-        else:
-            classes_present = 1.
-
-        correct, loss = 0, 0.
-        self.tnet.eval()
-        with torch.no_grad():
-            for images, labels in dataloader:
-                images, labels = images.to(device), labels.to(device)
-                outputs = self.tnet(images)
-                loss += criterion(outputs, labels).item()
-                pred = (outputs * classes_present).argmax(dim=-1)
-                if labels.dim() > 1:
-                    labels = labels.argmax(dim=-1)
-                correct += (pred == labels).sum().item()
-        length = len(dataloader.dataset)
-        loss /= length
-        accuracy = correct / length
-        # gc.collect()
-        return float(loss), length, {'accuracy': float(accuracy), 'loss': float(loss)}
+        raise NotImplementedError
 
 
 def main():
