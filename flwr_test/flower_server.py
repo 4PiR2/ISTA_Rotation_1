@@ -3,7 +3,7 @@ import concurrent.futures
 import timeit
 from logging import DEBUG, INFO, WARNING
 import os
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import flwr
 from flwr.common import (
@@ -21,14 +21,13 @@ from flwr.common import (
     ReconnectIns,
     Scalar,
     Metrics,
-    parameters_to_ndarrays,
     ndarrays_to_parameters,
+    parameters_to_ndarrays,
 )
 from flwr.common.logger import log
 from flwr.server.client_manager import ClientManager, SimpleClientManager
 from flwr.server.client_proxy import ClientProxy
 from flwr.server.history import History
-from flwr.server.strategy.aggregate import aggregate
 import numpy as np
 import torch
 import wandb
@@ -36,7 +35,8 @@ import wandb
 from PeFLL.models import CNNHyper
 
 from parse_args import parse_args
-from utils import init_wandb, finish_wandb, get_pefll_checkpoint
+from utils import aggregate_tensor, ndarrays_to_state_dicts, state_dicts_to_ndarrays, init_wandb, finish_wandb, \
+    get_pefll_checkpoint
 
 
 class FlowerStrategy(flwr.server.strategy.FedAvg):
@@ -67,12 +67,13 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
             client_optimizer_target_momentum: float = .9,
             client_optimizer_target_weight_decay: float = 5e-5,
             client_target_num_batches: int = 50,
-            client_optimizer_embed_type: str = 'adam',
-            client_optimizer_embed_lr: float = 2e-4,
+            optimizer_embed_type: str = 'adam',
+            optimizer_embed_lr: float = 2e-4,
+            optimizer_embed_weight_decay: float = 1e-3,
             client_embed_num_batches: int = 1,
             optimizer_hyper_type: str = 'adam',
             optimizer_hyper_lr: float = 2e-4,
-            optimizer_weight_decay: float = 1e-3,
+            optimizer_hyper_weight_decay: float = 1e-3,
             client_eval_mask_absent: bool = False,
             client_eval_embed_train_split: bool = True,
     ):
@@ -136,15 +137,14 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
         self.client_optimizer_target_momentum: float = client_optimizer_target_momentum
         self.client_optimizer_target_weight_decay: float = client_optimizer_target_weight_decay
         self.client_target_num_batches: int = client_target_num_batches
-        self.client_optimizer_embed_type: str = client_optimizer_embed_type
-        self.client_optimizer_embed_lr: float = client_optimizer_embed_lr
         self.client_embed_num_batches: int = client_embed_num_batches
-        self.optimizer_hyper_type: str = optimizer_hyper_type
-        self.optimizer_hyper_lr: float = optimizer_hyper_lr
-        self.optimizer_weight_decay: float = optimizer_weight_decay
         self.client_eval_mask_absent: bool = client_eval_mask_absent
         self.client_eval_embed_train_split: bool = client_eval_embed_train_split
+        self.server_device: torch.device = torch.device(f'cuda:{torch.cuda.device_count() - 1}') \
+            if torch.cuda.is_available() else torch.device('cpu')
         self.stage_memory: Dict = {}
+        self.parameters_tensor: List[torch.nn.Parameter] = []
+        self.optimizer_net: Optional[torch.optim.Optimizer] = None
 
         if model_embed_type != 'none':
             if client_dataset_data_name == 'femnist':
@@ -160,26 +160,54 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
                 hidden_dim=model_hyper_hid_dim,
                 spec_norm=False,
                 n_hidden=model_hyper_hid_layers,
-            )
+            ).to(device=self.server_device)
+
+            match optimizer_hyper_type:
+                case 'adam':
+                    self.optimizer_hnet: Optional[torch.optim.Optimizer] = torch.optim.Adam(
+                        self.hnet.parameters(),
+                        lr=optimizer_hyper_lr,
+                        weight_decay=0.,
+                    )
+                case 'sgd':
+                    self.optimizer_hnet: Optional[torch.optim.Optimizer] = torch.optim.SGD(
+                        self.hnet.parameters(),
+                        lr=optimizer_hyper_lr,
+                        momentum=.9,
+                        weight_decay=optimizer_hyper_weight_decay,
+                    )
+                case _:
+                    raise NotImplementedError
+            match optimizer_embed_type:
+                case 'adam':
+                    self.optimizer_net: Optional[torch.optim.Optimizer] = torch.optim.Adam(
+                        params=[torch.nn.Parameter(torch.empty(0, device=self.server_device))],
+                        lr=optimizer_embed_lr,
+                        weight_decay=0.,
+                    )
+                case 'sgd':
+                    self.optimizer_net: Optional[torch.optim.Optimizer] = torch.optim.SGD(
+                        params=[torch.nn.Parameter(torch.empty(0, device=self.server_device))],
+                        lr=optimizer_embed_lr,
+                        momentum=.9,
+                        weight_decay=optimizer_embed_weight_decay,
+                    )
+                case _:
+                    raise NotImplementedError
         else:
             self.hnet: Optional[torch.nn.Module] = None
+            self.optimizer_hnet: Optional[torch.optim.Optimizer] = None
 
     def initialize_parameters(self, client_manager: ClientManager) -> Optional[Parameters]:
         parameters = super().initialize_parameters(client_manager)
         net_name = 'tnet' if self.model_embed_type == 'none' else 'enet'
         if parameters is None and self.init_round:
-            header = [net_name]
-            keys: list[np.ndarray] = []
-            vals: List[np.ndarray] = []
-            for net_name in header:
-                state_dict = torch.load(
+            state_dicts = {net_name: torch.load(
                     os.path.join(self.log_dir, 'checkpoints', f'model_{net_name}_round_{self.init_round}.pth'),
                     map_location=torch.device('cpu'),
-                )
-                # state_dict = get_pefll_checkpoint()['enet_state_dict']
-                keys.append(np.asarray(list(state_dict.keys())))
-                vals.extend([val.detach().cpu().numpy() for val in state_dict.values()])
-            parameters = ndarrays_to_parameters([np.asarray(header)] + keys + vals)
+            )}
+            # state_dicts = {net_name: get_pefll_checkpoint()[f'{net_name}_state_dict']}
+            parameters = ndarrays_to_parameters(state_dicts_to_ndarrays(state_dicts))
             if self.hnet is not None:
                 state_dict = torch.load(
                     os.path.join(self.log_dir, 'checkpoints', f'model_{"hnet"}_round_{self.init_round}.pth'),
@@ -187,36 +215,40 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
                 )
                 # state_dict = get_pefll_checkpoint()['hnet_state_dict']
                 self.hnet.load_state_dict(state_dict, strict=True)
-        if parameters is not None:
+        if parameters is None:
+            # Get initial parameters from one of the clients
+            log(INFO, "Requesting initial parameters from one random client")
+            random_client = client_manager.sample(1)[0]
+            ins = GetParametersIns(config={'net_name': net_name})
+            get_parameters_res = random_client.get_parameters(ins=ins, timeout=None)
+            parameters = get_parameters_res.parameters
+            log(INFO, "Received initial parameters from one random client")
+        else:
             log(INFO, "Using initial parameters provided by strategy")
-            return parameters
-        # Get initial parameters from one of the clients
-        log(INFO, "Requesting initial parameters from one random client")
-        random_client = client_manager.sample(1)[0]
-        ins = GetParametersIns(config={'net_name': net_name})
-        get_parameters_res = random_client.get_parameters(ins=ins, timeout=None)
-        log(INFO, "Received initial parameters from one random client")
-        return get_parameters_res.parameters
+
+        if self.model_embed_type != 'none':
+            state_dicts = ndarrays_to_state_dicts(parameters_to_ndarrays(parameters))
+            self.parameters_tensor = [
+                torch.nn.Parameter(v.to(device=self.server_device)) for v in state_dicts[net_name].values()
+            ]
+            self.optimizer_net.add_param_group({'params': self.parameters_tensor})
+
+        return parameters
 
     def save_model(self, parameters: Parameters, server_round: int):
         # Save the model
         log(INFO, f'Saving round {server_round} aggregated_parameters...')
         os.makedirs(os.path.join(self.log_dir, 'checkpoints'), exist_ok=True)
-        # Convert `Parameters` to `List[np.ndarray]`
-        ndarrays: List[np.ndarray] = parameters_to_ndarrays(parameters)
-        # Convert `List[np.ndarray]` to PyTorch`state_dict`
-        for i, net_name in enumerate(ndarrays[0]):
-            keys = ndarrays[1 + i]
-            vals = ndarrays[1 + sum([len(k) for k in ndarrays[:1 + i]]): 1 + sum([len(k) for k in ndarrays[:2 + i]])]
-            state_dict = {k: torch.tensor(v) for k, v in zip(keys, vals)}
+        state_dicts = ndarrays_to_state_dicts(parameters_to_ndarrays(parameters))
+        for net_name, state_dict in state_dicts.items():
             torch.save(
                 state_dict,
-                os.path.join(self.log_dir, 'checkpoints', f'model_{net_name}_round_{server_round}.pth')
+                os.path.join(self.log_dir, 'checkpoints', f'model_{net_name}_round_{server_round}.pth'),
             )
         if self.hnet is not None:
             torch.save(
                 self.hnet.state_dict(),
-                os.path.join(self.log_dir, 'checkpoints', f'model_{"hnet"}_round_{server_round}.pth')
+                os.path.join(self.log_dir, 'checkpoints', f'model_{"hnet"}_round_{server_round}.pth'),
             )
 
     def configure_get_properties(self, client_manager: ClientManager) -> List[Tuple[ClientProxy, GetPropertiesIns]]:
@@ -307,35 +339,21 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
         match stage:
             case 1 | 4:
                 stage_config = {
-                    'is_eval': 0,
                     'client_optimizer_target_lr': self.client_optimizer_target_lr,
                     'client_optimizer_target_momentum': self.client_optimizer_target_momentum,
                     'client_optimizer_target_weight_decay': self.client_optimizer_target_weight_decay,
                     'client_target_num_batches': self.client_target_num_batches,
                 }
-            case 2:
-                stage_config = {
-                    'is_eval': 2 if self.eval_test else 1,
-                }
             case 3:
                 stage_config = {
-                    'is_eval': 0,
                     'client_embed_num_batches': self.client_embed_num_batches,
-                }
-            case 5:
-                stage_config = {
-                    'client_optimizer_embed_type': self.client_optimizer_embed_type,
-                    'client_optimizer_embed_lr': self.client_optimizer_embed_lr,
-                    'optimizer_weight_decay': self.optimizer_weight_decay,
                 }
             case 6:
                 stage_config = {
-                    'is_eval': 2 if self.eval_test else 1,
                     'client_eval_embed_train_split': self.client_eval_embed_train_split,
                 }
             case 7:
                 stage_config = {
-                    'is_eval': 2 if self.eval_test else 1,
                     'client_eval_mask_absent': self.client_eval_mask_absent,
                 }
             case _:
@@ -346,21 +364,15 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
             conf = {
                 **common_configs[i],
                 'stage': stage,
+                'is_eval': (stage in [2, 6, 7]) * (2 if self.eval_test else 1),
                 **stage_config,
             }
             client_config_pairs.append((client, FitIns(parameters[i], conf)))
         # Return client/config pairs
         return client_config_pairs
 
-    def configure_evaluate(
-            self,
-            server_round: int,
-            parameters: Parameters | List[Parameters] | None = None,
-            client_manager: Optional[ClientManager] = None,
-            stage: int = -1,
-            cids: Optional[List[int]] = None,
-    ) -> List[Tuple[ClientProxy, FitIns | EvaluateIns | GetPropertiesIns]]:
-        return self.configure_fit(server_round, parameters, client_manager, stage)
+    def configure_evaluate(self, *args, **kwargs):
+        raise NotImplementedError
 
     def aggregate_fit(
             self,
@@ -385,10 +397,21 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
                 for _, fit_res in results:
                     ndarrays = parameters_to_ndarrays(fit_res.parameters)
                     header_and_keys = ndarrays[:1+len(ndarrays[0])]
-                    vals = ndarrays[len(header_and_keys):]
+                    vals = [torch.tensor(v, device=self.server_device) for v in ndarrays[len(header_and_keys):]]
                     weights_results.append((vals, fit_res.num_examples))
-                aggregated_vals = aggregate(weights_results)
-                parameters_aggregated = ndarrays_to_parameters(header_and_keys + aggregated_vals)
+                aggregated_vals = aggregate_tensor(weights_results)
+                match stage:
+                    case 1:
+                        pass
+                    case 5:
+                        self.optimizer_net.zero_grad()
+                        for p, g in zip(self.parameters_tensor, aggregated_vals):
+                            p.grad = g
+                        self.optimizer_net.step()
+                        aggregated_vals = self.parameters_tensor
+                parameters_aggregated = ndarrays_to_parameters(
+                    header_and_keys + [v.detach().cpu().numpy() for v in aggregated_vals]
+                )
 
             case 2 | 7:
                 parameters_aggregated = None
@@ -401,12 +424,9 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
 
                 match stage:
                     case 3 | 6:
-                        device = torch.device(f'cuda:{torch.cuda.device_count() - 1}') \
-                            if torch.cuda.is_available() else torch.device('cpu')
-                        self.hnet = self.hnet.to(device)
                         embeddings = torch.nn.Parameter(torch.tensor(
                             np.asarray([parameters_to_ndarrays(fit_res.parameters)[0] for _, fit_res in results]),
-                            device=device,
+                            device=self.server_device,
                         ))
 
                         match stage:
@@ -433,10 +453,10 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
                     case 4:
                         embeddings = self.stage_memory['embeddings']
                         tnet_state_dicts = self.stage_memory['tnet_state_dicts']
-                        device = embeddings.device
 
                         result_values = [[
-                            torch.tensor(v, device=device) for v in parameters_to_ndarrays(fit_res.parameters)[2:]
+                            torch.tensor(v, device=self.server_device)
+                            for v in parameters_to_ndarrays(fit_res.parameters)[2:]
                         ] for _, fit_res in results]
 
                         losses = torch.stack([torch.stack([
@@ -447,29 +467,16 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
                         weights = torch.tensor(
                             [fit_res.num_examples for _, fit_res in results],
                             dtype=losses.dtype,
-                            device=device,
+                            device=self.server_device,
                         )
                         weights /= weights.sum()
                         loss = (losses * weights).sum()
                         fit_metrics['loss_h'] = float(loss)
 
-                        match self.optimizer_hyper_type:
-                            case 'adam':
-                                optimizer = torch.optim.Adam(self.hnet.parameters(), lr=self.optimizer_hyper_lr)
-                            case 'sgd':
-                                optimizer = torch.optim.SGD(
-                                    self.hnet.parameters(),
-                                    lr=self.optimizer_hyper_lr,
-                                    momentum=.9,
-                                    weight_decay=self.optimizer_weight_decay,
-                                )
-                            case _:
-                                raise NotImplementedError
-
-                        optimizer.zero_grad()
+                        self.optimizer_hnet.zero_grad()
                         loss.backward()
                         torch.nn.utils.clip_grad_norm_(self.hnet.parameters(), 50.)
-                        optimizer.step()
+                        self.optimizer_hnet.step()
 
                         parameters_aggregated = [
                             ndarrays_to_parameters([grad]) for grad in embeddings.grad.detach().cpu().numpy()
@@ -713,12 +720,13 @@ def make_server(args: argparse.Namespace):
         client_optimizer_target_momentum=args.client_optimizer_target_momentum,
         client_optimizer_target_weight_decay=args.client_optimizer_target_weight_decay,
         client_target_num_batches=args.client_target_num_batches,
-        client_optimizer_embed_type=args.client_optimizer_embed_type,
-        client_optimizer_embed_lr=args.client_optimizer_embed_lr,
+        optimizer_embed_type=args.optimizer_embed_type,
+        optimizer_embed_lr=args.optimizer_embed_lr,
+        optimizer_embed_weight_decay=args.optimizer_embed_weight_decay,
         client_embed_num_batches=args.client_embed_num_batches,
         optimizer_hyper_type=args.optimizer_hyper_type,
         optimizer_hyper_lr=args.optimizer_hyper_lr,
-        optimizer_weight_decay=args.optimizer_weight_decay,
+        optimizer_hyper_weight_decay=args.optimizer_hyper_weight_decay,
         client_eval_mask_absent=args.client_eval_mask_absent,
         client_eval_embed_train_split=args.client_eval_embed_train_split,
     )

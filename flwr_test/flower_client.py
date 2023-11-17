@@ -16,6 +16,7 @@ from PeFLL.models import CNNTarget, CNNEmbed, MLPEmbed
 from PeFLL.utils import set_seed
 
 from parse_args import parse_args
+from utils import state_dicts_to_ndarrays, ndarrays_to_state_dicts
 
 
 class FlowerClient(flwr.client.NumPyClient):
@@ -100,25 +101,13 @@ class FlowerClient(flwr.client.NumPyClient):
         if config is not None and 'net_name' in config:
             header = [config['net_name']]
         else:
-            header = []
-            for net_name in self.__dir__():
-                if isinstance(self.__getattribute__(net_name), torch.nn.Module):
-                    header.append(net_name)
-        keys: List[np.ndarray] = []
-        vals: List[np.ndarray] = []
-        for net_name in header:
-            net = self.__getattribute__(net_name)
-            keys.append(np.asarray(list(net.state_dict().keys())))
-            vals.extend([val.detach().cpu().numpy() for val in net.state_dict().values()])
-        return [np.asarray(header)] + keys + vals
+            header = [net_name for net_name in self.__dir__() if isinstance(self.__getattribute__(net_name), torch.nn.Module)]
+        state_dicts = {net_name: self.__getattribute__(net_name).state_dict() for net_name in header}
+        return state_dicts_to_ndarrays(state_dicts)
 
     def set_parameters(self, parameters: List[np.ndarray]) -> None:
-        for i, net_name in enumerate(parameters[0]):
-            net: torch.nn.Module = self.__getattribute__(net_name)
-            keys = parameters[1 + i]
-            vals = parameters[1 + sum([len(k) for k in parameters[:1+i]]): 1 + sum([len(k) for k in parameters[:2+i]])]
-            state_dict = {k: torch.tensor(v) for k, v in zip(keys, vals)}
-            net.load_state_dict(state_dict, strict=True)
+        for net_name, state_dict in ndarrays_to_state_dicts(parameters).items():
+            self.__getattribute__(net_name).load_state_dict(state_dict, strict=True)
 
     def fit(self, parameters: List[np.ndarray], config: Config) -> Tuple[NDArrays, int, Dict[str, Scalar]]:
         """Train the network on the training set."""
@@ -192,7 +181,6 @@ class FlowerClient(flwr.client.NumPyClient):
         self.stage_memory['length'] = length
         self.stage_memory['label_count'] = label_count
 
-        # gc.collect()
         return [embedding_ndarray], length, {}
 
     def fit_2(self, parameters: List[np.ndarray], config: Config) -> Tuple[NDArrays, int, Dict[str, Scalar]]:
@@ -272,32 +260,19 @@ class FlowerClient(flwr.client.NumPyClient):
 
     def fit_3(self, parameters: List[np.ndarray], config: Config) -> Tuple[NDArrays, int, Dict[str, Scalar]]:
         embedding = self.stage_memory['embedding']
-        grad = torch.tensor(parameters[0], device=embedding.device)
-        loss = (grad * embedding).sum()
+        embed_grad = torch.tensor(parameters[0], device=embedding.device)
+        loss = (embed_grad * embedding).sum()
 
-        lr = config['client_optimizer_embed_lr']
-        match config['client_optimizer_embed_type']:
-            case 'adam':
-                optimizer = torch.optim.Adam(self.enet.parameters(), lr=lr)
-            case 'sgd':
-                optimizer = torch.optim.SGD(
-                    self.enet.parameters(),
-                    lr=lr,
-                    momentum=.9,
-                    weight_decay=config['optimizer_weight_decay'],
-                )
-            case _:
-                raise NotImplementedError
-
-        optimizer.zero_grad()
+        for p in self.enet.parameters():
+            p.grad = None
         loss.backward()
         torch.nn.utils.clip_grad_norm_(list(self.enet.parameters()), 50.)
-        optimizer.step()
+        p_grads = ([np.asarray(['enet']), np.asarray(list(self.enet.state_dict().keys()))]
+                   + [p.grad.detach().cpu().numpy() for p in self.enet.parameters()])
 
         length = self.stage_memory['length']
 
-        # gc.collect()
-        return self.get_parameters({'net_name': 'enet'}), length, {
+        return p_grads, length, {
             'loss_3': float(loss)
         }
 

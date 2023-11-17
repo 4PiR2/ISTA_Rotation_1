@@ -1,10 +1,60 @@
 import argparse
 import os
 import subprocess
-from typing import List, Optional
+from functools import reduce
+from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
 import wandb
+
+
+def aggregate_tensor_old(results: List[Tuple[List[torch.Tensor], int]]) -> List[torch.Tensor]:
+    """Compute weighted average."""
+    # flwr.server.strategy.aggregate.aggregate
+    # Calculate the total number of examples used during training
+    num_examples_total = sum([num_examples for _, num_examples in results])
+
+    # Create a list of weights, each multiplied by the related number of examples
+    weighted_weights = [
+        [layer * num_examples for layer in weights] for weights, num_examples in results
+    ]
+
+    # Compute average weights of each layer
+    weights_prime = [
+        reduce(torch.add, layer_updates) / num_examples_total
+        for layer_updates in zip(*weighted_weights)
+    ]
+    return weights_prime
+
+
+def aggregate_tensor(results: List[Tuple[List[torch.Tensor], int]]) -> List[torch.Tensor]:
+    """Compute weighted average."""
+    xs = [torch.stack(x.tolist(), dim=0) for x in np.asarray([v for v, _ in results], dtype=torch.Tensor).T]
+    n = torch.tensor([v for _, v in results], dtype=xs[0].dtype, device=xs[0].device)
+    n /= n.sum()
+    return [(x * n[(...,) + (None,) * (x.dim() - 1)]).sum(dim=0) for x in xs]
+
+
+def state_dicts_to_ndarrays(state_dicts: Dict[str, Dict[str, torch.Tensor]]) -> List[np.ndarray]:
+    header: List[str] = []
+    keys: List[np.ndarray] = []
+    vals: List[np.ndarray] = []
+    for net_name, state_dict in state_dicts.items():
+        header.append(net_name)
+        keys.append(np.asarray(list(state_dict.keys())))
+        vals.extend([val.detach().cpu().numpy() for val in state_dict.values()])
+    ndarrays: List[np.ndarray] = [np.asarray(header)] + keys + vals
+    return ndarrays
+
+
+def ndarrays_to_state_dicts(ndarrays: List[np.ndarray]) -> Dict[str, Dict[str, torch.Tensor]]:
+    state_dicts: Dict[str, Dict[str, torch.Tensor]] = {}
+    for i, net_name in enumerate(ndarrays[0]):
+        keys = ndarrays[1 + i]
+        vals = ndarrays[1 + sum([len(k) for k in ndarrays[:1 + i]]): 1 + sum([len(k) for k in ndarrays[:2 + i]])]
+        state_dicts[net_name] = {k: torch.tensor(v) for k, v in zip(keys, vals)}
+    return state_dicts
 
 
 def run(cmd: List[str], cwd: Optional[str] = None, env=None, shell=False, blocking: bool = True):
