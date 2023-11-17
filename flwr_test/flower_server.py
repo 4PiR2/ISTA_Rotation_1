@@ -45,8 +45,9 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
             mode: str,
             num_train_clients: int,
             num_step_clients: int,
-            eval_interval: int = 10,
             init_round: int = 0,
+            eval_interval: int = 10,
+            eval_test: bool = False,
             log_dir: str = './outputs',
             client_dataset_seed: int = 42,
             client_dataset_data_name: str = 'cifar10',
@@ -113,8 +114,9 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
             evaluate_metrics_aggregation_fn=weighted_average,
         )
 
-        self.eval_interval: int = eval_interval
         self.init_round: int = init_round
+        self.eval_interval: int = eval_interval
+        self.eval_test: bool = eval_test
         self.log_dir: str = log_dir
         self.client_dataset_seed: int = client_dataset_seed
         self.client_dataset_data_name: str = client_dataset_data_name
@@ -218,7 +220,7 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
             )
 
     def configure_get_properties(self, client_manager: ClientManager) -> List[Tuple[ClientProxy, GetPropertiesIns]]:
-        client_config_pairs_updated: List[Tuple[ClientProxy, GetPropertiesIns]] = []
+        client_config_pairs: List[Tuple[ClientProxy, GetPropertiesIns]] = []
         for i, (cid, client) in enumerate(client_manager.all().items()):
             conf = {
                 'num_train_clients': self.num_train_clients,
@@ -235,21 +237,24 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
                 'model_embed_dim': self.model_embed_dim,
                 'client_model_embed_y': self.client_model_embed_y,
             }
-            client_config_pairs_updated.append((client, GetPropertiesIns(conf)))
-        return client_config_pairs_updated
+            client_config_pairs.append((client, GetPropertiesIns(conf)))
+        return client_config_pairs
 
     def configure_fit(
             self,
             server_round: int = -1,
             parameters: Parameters | List[Parameters] | None = None,
-            client_manager: ClientManager | None = None,
+            client_manager: Optional[ClientManager] = None,
             stage: int = -1,
             cids: Optional[List[int]] = None,
     ) -> List[Tuple[ClientProxy, FitIns | EvaluateIns | GetPropertiesIns]]:
         match stage:
             case 1 | 2 | 3 | 6:
                 # Sample clients
-                sample_size, min_num_clients = self.num_fit_clients(client_manager.num_available())
+                if cids is None:
+                    sample_size, min_num_clients = self.num_fit_clients(client_manager.num_available())
+                else:
+                    sample_size = min_num_clients = len(cids)
                 clients = client_manager.sample(num_clients=sample_size, min_num_clients=min_num_clients)
                 all_cids = sorted(list(client_manager.all().keys()))
 
@@ -261,8 +266,6 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
                                 len(clients),
                                 replace=False
                             ).tolist()
-                        else:
-                            clients = clients[:len(cids)]
                     case 'simulated':
                         cids = [int(client.cid) for client in clients]
                     case 'distributed':
@@ -304,20 +307,19 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
         match stage:
             case 1 | 4:
                 stage_config = {
-                    'is_eval': False,
+                    'is_eval': 0,
                     'client_optimizer_target_lr': self.client_optimizer_target_lr,
                     'client_optimizer_target_momentum': self.client_optimizer_target_momentum,
                     'client_optimizer_target_weight_decay': self.client_optimizer_target_weight_decay,
                     'client_target_num_batches': self.client_target_num_batches,
                 }
-            case 2 | 7:
+            case 2:
                 stage_config = {
-                    'is_eval': True,
-                    'client_eval_mask_absent': self.client_eval_mask_absent,
+                    'is_eval': 2 if self.eval_test else 1,
                 }
             case 3:
                 stage_config = {
-                    'is_eval': False,
+                    'is_eval': 0,
                     'client_embed_num_batches': self.client_embed_num_batches,
                 }
             case 5:
@@ -328,8 +330,13 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
                 }
             case 6:
                 stage_config = {
-                    'is_eval': True,
+                    'is_eval': 2 if self.eval_test else 1,
                     'client_eval_embed_train_split': self.client_eval_embed_train_split,
+                }
+            case 7:
+                stage_config = {
+                    'is_eval': 2 if self.eval_test else 1,
+                    'client_eval_mask_absent': self.client_eval_mask_absent,
                 }
             case _:
                 stage_config = {}
@@ -346,9 +353,10 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
         return client_config_pairs
 
     def configure_evaluate(
-            self, server_round: int,
-            parameters: Parameters | List[Parameters] | None,
-            client_manager: ClientManager,
+            self,
+            server_round: int,
+            parameters: Parameters | List[Parameters] | None = None,
+            client_manager: Optional[ClientManager] = None,
             stage: int = -1,
             cids: Optional[List[int]] = None,
     ) -> List[Tuple[ClientProxy, FitIns | EvaluateIns | GetPropertiesIns]]:
@@ -368,6 +376,7 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
         if not self.accept_failures and failures:
             return None, {}
 
+        fit_metrics = {}
         match stage:
             case 1 | 5:
                 # Convert results
@@ -442,6 +451,7 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
                         )
                         weights /= weights.sum()
                         loss = (losses * weights).sum()
+                        fit_metrics['loss_h'] = float(loss)
 
                         match self.optimizer_hyper_type:
                             case 'adam':
@@ -474,10 +484,12 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
         # Aggregate custom metrics if aggregation fn was provided
         metrics_aggregated = {}
         if self.fit_metrics_aggregation_fn:
-            fit_metrics = [(res.num_examples, res.metrics) for _, res in results]
-            metrics_aggregated = self.fit_metrics_aggregation_fn(fit_metrics)
+            metrics_aggregated = self.fit_metrics_aggregation_fn(
+                [(res.num_examples, res.metrics) for _, res in results]
+            )
         elif server_round == 1:  # Only log this warning once
             log(WARNING, "No fit_metrics_aggregation_fn provided")
+        metrics_aggregated = {**fit_metrics, **metrics_aggregated}
         log(INFO, f'round_{server_round}_stage_{stage}: {metrics_aggregated}')
         return parameters_aggregated, metrics_aggregated
 
@@ -665,6 +677,8 @@ class FlowerServer(flwr.server.Server):
             metrics.append((len(cids), m))
         metrics_aggregated = self.strategy.evaluate_metrics_aggregation_fn(metrics)
 
+        log(INFO, f'val_{server_round}: {metrics_aggregated}')
+
         if wandb.run is not None:
             wandb.log({'val': metrics_aggregated}, commit=True, step=server_round)
 
@@ -677,8 +691,9 @@ def make_server(args: argparse.Namespace):
         mode=args.mode,
         num_train_clients=args.num_train_clients,
         num_step_clients=args.num_step_clients,
-        eval_interval=args.eval_interval,
         init_round=args.init_round,
+        eval_interval=args.eval_interval,
+        eval_test=args.eval_test,
         log_dir=args.log_dir,
         client_dataset_seed=args.client_dataset_seed,
         client_dataset_data_name=args.client_dataset_data_name,

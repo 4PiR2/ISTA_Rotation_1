@@ -1,5 +1,6 @@
 import gc
 from logging import DEBUG, INFO
+import time
 import traceback
 from typing import Dict, List, Optional, Tuple
 
@@ -149,7 +150,13 @@ class FlowerClient(flwr.client.NumPyClient):
             if config['client_eval_embed_train_split']:
                 dataloader = self.trainloaders[cid]
             else:
-                dataloader = self.valloaders[cid]
+                match is_eval:
+                    case 1:
+                        dataloader = self.valloaders[cid]
+                    case 2:
+                        dataloader = self.testloaders[cid]
+                    case _:
+                        raise NotImplementedError
             num_batches = -1
 
         num_batches = num_batches if num_batches != -1 else len(dataloader)
@@ -209,10 +216,16 @@ class FlowerClient(flwr.client.NumPyClient):
             num_batches = config['client_target_num_batches']
         else:
             self.tnet.eval()
-            dataloader = self.valloaders[cid]
+            match is_eval:
+                case 1:
+                    dataloader = self.valloaders[cid]
+                case 2:
+                    dataloader = self.testloaders[cid]
+                case _:
+                    raise NotImplementedError
             num_batches = len(dataloader)
 
-        if is_eval and config['client_eval_mask_absent'] and 'label_count' in self.stage_memory:
+        if is_eval and 'client_eval_mask_absent' in config and config['client_eval_mask_absent']:
             classes_present = self.stage_memory['label_count'].bool().log()
         else:
             classes_present = 0.
@@ -302,6 +315,7 @@ def main():
         except Exception as e:
             log(DEBUG, e)
             log(DEBUG, traceback.format_exc())
+            time.sleep(1.)
         else:
             break
 
