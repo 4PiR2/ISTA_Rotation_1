@@ -168,9 +168,8 @@ class FlowerClient(flwr.client.NumPyClient):
             with torch.no_grad():
                 embedding = self.enet((image_all, label_all)).mean(dim=0)
 
-        # TODO
-        m, s = 0.25064870715141296 / 16., 1.0152097940444946 / 16.
-        embedding = (embedding - m) / s
+        # m, s = 0.25064870715141296 / 16., 1.0152097940444946 / 16.
+        # embedding = (embedding - m) / s
 
         embedding_ndarray = embedding.detach().cpu().numpy()
 

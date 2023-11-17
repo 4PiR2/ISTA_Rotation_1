@@ -30,10 +30,10 @@ def aggregate_tensor_old(results: List[Tuple[List[torch.Tensor], int]]) -> List[
 
 def aggregate_tensor(results: List[Tuple[List[torch.Tensor], int]]) -> List[torch.Tensor]:
     """Compute weighted average."""
-    xs = [torch.stack(x.tolist(), dim=0) for x in np.asarray([v for v, _ in results], dtype=torch.Tensor).T]
-    n = torch.tensor([v for _, v in results], dtype=xs[0].dtype, device=xs[0].device)
-    n /= n.sum()
-    return [(x * n[(...,) + (None,) * (x.dim() - 1)]).sum(dim=0) for x in xs]
+    layer_updates: List[List[torch.Tensor]] = [x for x, _ in results]
+    weight = torch.tensor([v for _, v in results], dtype=layer_updates[0][0].dtype, device=layer_updates[0][0].device)
+    weight /= weight.sum()
+    return [(torch.stack(x, dim=0) * weight[(...,) + (None,) * x[0].dim()]).sum(dim=0) for x in zip(*layer_updates)]
 
 
 def state_dicts_to_ndarrays(state_dicts: Dict[str, Dict[str, torch.Tensor]]) -> List[np.ndarray]:

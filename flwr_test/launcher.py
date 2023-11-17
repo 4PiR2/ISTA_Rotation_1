@@ -67,7 +67,7 @@ def main():
                 return
 
         p_server = run(['python3', 'flower_server.py'] + sys.argv[1:], blocking=False)
-        time.sleep(10.)
+        # time.sleep(10.)
         p_clients = [run(['python3', 'flower_client.py'] + sys.argv[1:], blocking=False)
                      for _ in range(num_available_clients)]
 

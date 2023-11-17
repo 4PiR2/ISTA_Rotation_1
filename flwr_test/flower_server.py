@@ -390,7 +390,7 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
 
         fit_metrics = {}
         match stage:
-            case 1 | 5:
+            case 1:
                 # Convert results
                 header_and_keys = [np.array([])]
                 weights_results = []
@@ -400,17 +400,25 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
                     vals = [torch.tensor(v, device=self.server_device) for v in ndarrays[len(header_and_keys):]]
                     weights_results.append((vals, fit_res.num_examples))
                 aggregated_vals = aggregate_tensor(weights_results)
-                match stage:
-                    case 1:
-                        pass
-                    case 5:
-                        self.optimizer_net.zero_grad()
-                        for p, g in zip(self.parameters_tensor, aggregated_vals):
-                            p.grad = g
-                        self.optimizer_net.step()
-                        aggregated_vals = self.parameters_tensor
                 parameters_aggregated = ndarrays_to_parameters(
                     header_and_keys + [v.detach().cpu().numpy() for v in aggregated_vals]
+                )
+
+            case 5:
+                # Convert results
+                header_and_keys = [np.array([])]
+                vals = []
+                for _, fit_res in results:
+                    ndarrays = parameters_to_ndarrays(fit_res.parameters)
+                    header_and_keys = ndarrays[:1+len(ndarrays[0])]
+                    vals.append([torch.tensor(v, device=self.server_device) for v in ndarrays[len(header_and_keys):]])
+                aggregated_vals = [torch.stack(layer_updates, dim=0).sum(dim=0) for layer_updates in zip(*vals)]
+                self.optimizer_net.zero_grad()
+                for p, g in zip(self.parameters_tensor, aggregated_vals):
+                    p.grad = g
+                self.optimizer_net.step()
+                parameters_aggregated = ndarrays_to_parameters(
+                    header_and_keys + [v.detach().cpu().numpy() for v in self.parameters_tensor]
                 )
 
             case 2 | 7:
