@@ -168,19 +168,11 @@ class FlowerClient(flwr.client.NumPyClient):
             with torch.no_grad():
                 embedding = self.enet((image_all, label_all)).mean(dim=0)
 
-        # m, s = 0.25064870715141296 / 16., 1.0152097940444946 / 16.
-        # embedding = (embedding - m) / s
-
         embedding_ndarray = embedding.detach().cpu().numpy()
-
-        length = len(label_all)
         label_count = label_all.sum(dim=0)
-
         self.stage_memory['embedding'] = embedding
-        self.stage_memory['length'] = length
         self.stage_memory['label_count'] = label_count
-
-        return [embedding_ndarray], length, {}
+        return [embedding_ndarray], 1, {}
 
     def fit_2(self, parameters: List[np.ndarray], config: Config) -> Tuple[NDArrays, int, Dict[str, Scalar]]:
         device = torch.device(config['device'])
@@ -253,26 +245,22 @@ class FlowerClient(flwr.client.NumPyClient):
 
         # gc.collect()
         return parameters, length, {
-            'loss_2': float(total_loss),
-            'accuracy_2': float(total_correct),
+            'loss_t': float(total_loss),
+            'accuracy': float(total_correct),
         }
 
     def fit_3(self, parameters: List[np.ndarray], config: Config) -> Tuple[NDArrays, int, Dict[str, Scalar]]:
         embedding = self.stage_memory['embedding']
         embed_grad = torch.tensor(parameters[0], device=embedding.device)
         loss = (embed_grad * embedding).sum()
-
         for p in self.enet.parameters():
             p.grad = None
         loss.backward()
         torch.nn.utils.clip_grad_norm_(list(self.enet.parameters()), 50.)
         p_grads = ([np.asarray(['enet']), np.asarray(list(self.enet.state_dict().keys()))]
                    + [p.grad.detach().cpu().numpy() for p in self.enet.parameters()])
-
-        length = self.stage_memory['length']
-
-        return p_grads, length, {
-            'loss_3': float(loss)
+        return p_grads, 1, {
+            'loss_e': float(loss)
         }
 
     def evaluate(self, parameters: List[np.ndarray], config: Config) -> Tuple[float, int, Dict[str, Scalar]]:
