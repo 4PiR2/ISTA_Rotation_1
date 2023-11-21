@@ -1,5 +1,6 @@
 import argparse
 import concurrent.futures
+import queue
 import timeit
 from logging import DEBUG, INFO, WARNING
 import os
@@ -146,16 +147,20 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
         self.client_eval_embed_train_split: bool = client_eval_embed_train_split
         self.server_device: torch.device = torch.device(f'cuda:{torch.cuda.device_count() - 1}') \
             if torch.cuda.is_available() else torch.device('cpu')
-        self.stage_memory: Dict = {}
-        self.parameters_tensor: List[torch.nn.Parameter] = []
+        self.parameters_tensor: Optional[Dict[str, torch.nn.Parameter]] = None
         self.optimizer_net: Optional[torch.optim.Optimizer] = None
+        self.hnet: Optional[torch.nn.Module] = None
+        self.optimizer_hnet: Optional[torch.optim.Optimizer] = None
+        self.hnet_grads: Optional[queue.Queue] = None
 
         if model_embed_type != 'none':
+            self.hnet_grads: Optional[queue.Queue] = queue.Queue()
+
             if client_dataset_data_name == 'femnist':
                 client_dataset_num_clients = 3597
             if model_embed_dim == -1:
                 model_embed_dim = 1 + client_dataset_num_clients // 4
-            self.hnet: torch.nn.Module = CNNHyper(
+            self.hnet: Optional[torch.nn.Module] = CNNHyper(
                 n_nodes=client_dataset_num_clients,
                 embedding_dim=model_embed_dim,
                 in_channels=3,
@@ -182,6 +187,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
                     )
                 case _:
                     raise NotImplementedError
+
             match optimizer_embed_type:
                 case 'adam':
                     self.optimizer_net: Optional[torch.optim.Optimizer] = torch.optim.Adam(
@@ -198,9 +204,65 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
                     )
                 case _:
                     raise NotImplementedError
-        else:
-            self.hnet: Optional[torch.nn.Module] = None
-            self.optimizer_hnet: Optional[torch.optim.Optimizer] = None
+
+    def fit(self, num_rounds: int, timeout: Optional[float]) -> History:
+        """Run federated averaging for a number of rounds."""
+        history = History()
+        client_manager = self.client_manager()
+
+        log(INFO, 'Waiting until all clients are ready')
+        while client_manager.num_available() < self.min_available_clients:
+            pass
+
+        log(INFO, "Initializing clients")
+        self.init_clients(timeout)
+
+        # Initialize parameters
+        log(INFO, "Initializing global parameters")
+        self.parameters = self.initialize_parameters(client_manager=client_manager)
+
+        # Run federated learning for num_rounds
+        log(INFO, "FL starting")
+        start_time = timeit.default_timer()
+
+        # self.evaluate_round(0, timeout)
+        for server_round in range(1 + self.init_round, 1 + num_rounds):
+            self.fit_round(server_round, timeout)
+            if server_round % self.eval_interval:
+                continue
+            self.save_model(self.parameters, server_round)  # save model checkpoint
+            self.evaluate_round(server_round, timeout)
+
+        # Bookkeeping
+        end_time = timeit.default_timer()
+        elapsed = end_time - start_time
+        log(INFO, "FL finished in %s", elapsed)
+        return history
+
+    def init_clients(self, timeout: Optional[float] = None):
+        conf = {
+            'num_train_clients': self.num_train_clients,
+            'client_dataset_seed': self.client_dataset_seed,
+            'client_dataset_data_name': self.client_dataset_data_name,
+            'client_dataset_data_path': self.client_dataset_data_path,
+            'client_dataset_num_clients': self.client_dataset_num_clients,
+            'client_dataset_batch_size': self.client_dataset_batch_size,
+            'client_dataset_partition_type': self.client_dataset_partition_type,
+            'client_dataset_alpha_train': self.client_dataset_alpha_train,
+            'client_dataset_alpha_test': self.client_dataset_alpha_test,
+            'model_num_kernels': self.model_num_kernels,
+            'model_embed_type': self.model_embed_type,
+            'model_embed_dim': self.model_embed_dim,
+            'client_model_embed_y': self.client_model_embed_y,
+        }
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            submitted_fs = {
+                executor.submit(client.get_properties, GetPropertiesIns(conf), timeout)
+                for client in self.client_manager().all().values()
+            }
+            finished_fs, _ = concurrent.futures.wait(fs=submitted_fs, timeout=timeout)
+        for future in finished_fs:
+            assert future.exception() is None
 
     def initialize_parameters(self, client_manager: ClientManager) -> Optional[Parameters]:
         parameters = super().initialize_parameters(client_manager)
@@ -208,14 +270,14 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
         if parameters is None and self.init_round:
             state_dicts = {net_name: torch.load(
                     os.path.join(self.log_dir, 'checkpoints', f'model_{net_name}_round_{self.init_round}.pth'),
-                    map_location=torch.device('cpu'),
+                    map_location=self.server_device,
             )}
             # state_dicts = {net_name: get_pefll_checkpoint()[f'{net_name}_state_dict']}
             parameters = ndarrays_to_parameters(state_dicts_to_ndarrays(state_dicts))
             if self.hnet is not None:
                 state_dict = torch.load(
                     os.path.join(self.log_dir, 'checkpoints', f'model_{"hnet"}_round_{self.init_round}.pth'),
-                    map_location=torch.device('cpu'),
+                    map_location=self.server_device,
                 )
                 # state_dict = get_pefll_checkpoint()['hnet_state_dict']
                 self.hnet.load_state_dict(state_dict, strict=True)
@@ -231,11 +293,11 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             log(INFO, "Using initial parameters provided by strategy")
 
         if self.model_embed_type != 'none':
-            state_dicts = ndarrays_to_state_dicts(parameters_to_ndarrays(parameters))
-            self.parameters_tensor = [
-                torch.nn.Parameter(v.to(device=self.server_device)) for v in state_dicts[net_name].values()
-            ]
-            self.optimizer_net.add_param_group({'params': self.parameters_tensor})
+            state_dicts = ndarrays_to_state_dicts(parameters_to_ndarrays(parameters), self.server_device)
+            self.parameters_tensor = {
+                k: torch.nn.Parameter(v) for k, v in state_dicts[net_name].items()
+            }
+            self.optimizer_net.add_param_group({'params': self.parameters_tensor.values()})
 
         return parameters
 
@@ -243,7 +305,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
         # Save the model
         log(INFO, f'Saving round {server_round} aggregated_parameters...')
         os.makedirs(os.path.join(self.log_dir, 'checkpoints'), exist_ok=True)
-        state_dicts = ndarrays_to_state_dicts(parameters_to_ndarrays(parameters))
+        state_dicts = ndarrays_to_state_dicts(parameters_to_ndarrays(parameters), self.server_device)
         for net_name, state_dict in state_dicts.items():
             torch.save(
                 state_dict,
@@ -254,27 +316,6 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
                 self.hnet.state_dict(),
                 os.path.join(self.log_dir, 'checkpoints', f'model_{"hnet"}_round_{server_round}.pth'),
             )
-
-    def configure_get_properties(self, client_manager: ClientManager) -> List[Tuple[ClientProxy, GetPropertiesIns]]:
-        client_config_pairs: List[Tuple[ClientProxy, GetPropertiesIns]] = []
-        for i, (cid, client) in enumerate(client_manager.all().items()):
-            conf = {
-                'num_train_clients': self.num_train_clients,
-                'client_dataset_seed': self.client_dataset_seed,
-                'client_dataset_data_name': self.client_dataset_data_name,
-                'client_dataset_data_path': self.client_dataset_data_path,
-                'client_dataset_num_clients': self.client_dataset_num_clients,
-                'client_dataset_batch_size': self.client_dataset_batch_size,
-                'client_dataset_partition_type': self.client_dataset_partition_type,
-                'client_dataset_alpha_train': self.client_dataset_alpha_train,
-                'client_dataset_alpha_test': self.client_dataset_alpha_test,
-                'model_num_kernels': self.model_num_kernels,
-                'model_embed_type': self.model_embed_type,
-                'model_embed_dim': self.model_embed_dim,
-                'client_model_embed_y': self.client_model_embed_y,
-            }
-            client_config_pairs.append((client, GetPropertiesIns(conf)))
-        return client_config_pairs
 
     def sample_clients(
             self,
@@ -314,48 +355,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
 
         return clients, cids, devices
 
-    def fit(self, num_rounds: int, timeout: Optional[float]) -> History:
-        """Run federated averaging for a number of rounds."""
-        history = History()
-        client_manager = self.client_manager()
-
-        log(INFO, 'Waiting until all clients are ready')
-        while client_manager.num_available() < self.min_available_clients:
-            pass
-
-        log(INFO, "Initializing clients")
-        get_properties_instructions = self.configure_get_properties(client_manager)
-        _, get_properties_failures = self.execute_round(
-            fn_name='get_properties',
-            client_instructions=get_properties_instructions,
-            server_round=0,
-            timeout=timeout,
-        )
-        assert not get_properties_failures
-
-        # Initialize parameters
-        log(INFO, "Initializing global parameters")
-        self.parameters = self.initialize_parameters(client_manager=client_manager)
-
-        # Run federated learning for num_rounds
-        log(INFO, "FL starting")
-        start_time = timeit.default_timer()
-
-        self.evaluate_round(0, timeout)
-        for server_round in range(1 + self.init_round, 1 + num_rounds):
-            self.fit_round(server_round, timeout)
-            if server_round % self.eval_interval:
-                continue
-            self.save_model(self.parameters, server_round)  # save model checkpoint
-            self.evaluate_round(server_round, timeout)
-
-        # Bookkeeping
-        end_time = timeit.default_timer()
-        elapsed = end_time - start_time
-        log(INFO, "FL finished in %s", elapsed)
-        return history
-
-    def fit_round(self, server_round: int, cids: List[int] = None) -> Optional[Dict[str, Scalar]]:
+    def fit_round(self, server_round: int, timeout: Optional[float] = None) -> Optional[Dict[str, Scalar]]:
         """Perform a single round of federated averaging."""
         if self.model_embed_type != 'none':
             self.hnet.train()
@@ -368,112 +368,62 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
                 executor.submit(client_fn, client, cid, device)
                 for client, cid, device in zip(*self.sample_clients())
             }
+
+            if self.model_embed_type != 'none':
+                hnet_grad = aggregate_tensor([
+                    self.hnet_grads.get(block=True, timeout=timeout) for _ in range(len(submitted_fs))
+                ])
+                self.optimizer_hnet.zero_grad()
+                for p, g in zip(self.hnet.parameters(), hnet_grad):
+                    p.grad = g
+                torch.nn.utils.clip_grad_norm_(self.hnet.parameters(), 50.)
+                self.optimizer_hnet.step()
+
             # Handled in the respective communication stack
-            finished_fs, _ = concurrent.futures.wait(fs=submitted_fs, timeout=None)
+            finished_fs, _ = concurrent.futures.wait(fs=submitted_fs, timeout=timeout)
+
+        weights, metrics, state_dicts = [], [], []
+        for future in finished_fs:
+            """Convert finished future into either a result or a failure."""
+            # Check if there was an exception
+            assert future.exception() is None
+            # Successfully received a result from a client
+            w, m, sd = future.result()
+            weights.append(w)
+            metrics.append(m)
+            state_dicts.append(sd)
+
+        state_dict = {
+            kg: vg for kg, vg in zip(
+                state_dicts[0].keys(),
+                aggregate_tensor([
+                    ([sd[k] for k in state_dicts[0].keys()], w) for sd, w in zip(state_dicts, weights)
+                ])
+            )
+        }
 
         if self.model_embed_type != 'none':
-            weights, metrics, hnet_grads, enet_grads = [], [], [], []
-            for future in finished_fs:
-                """Convert finished future into either a result or a failure."""
-                # Check if there was an exception
-                assert future.exception() is None
-                # Successfully received a result from a client
-                w, m, hg, eg = future.result()
-                weights.append(w)
-                metrics.append(m)
-                hnet_grads.append((hg, w))
-                enet_grads.append((eg, w))
-
-            hnet_grad = aggregate_tensor(hnet_grads)
-            enet_grad = aggregate_tensor(enet_grads)
-
-            self.optimizer_hnet.zero_grad()
-            for p, g in zip(self.hnet.parameters(), hnet_grad):
-                p.grad = g
-            torch.nn.utils.clip_grad_norm_(self.hnet.parameters(), 50.)
-            self.optimizer_hnet.step()
-
             self.optimizer_net.zero_grad()
-            for p, g in zip(self.parameters_tensor, enet_grad):
-                p.grad = g
-            torch.nn.utils.clip_grad_norm_(self.parameters_tensor, 50.)
+            for k, g in state_dict.items():
+                self.parameters_tensor[k].grad = g
+            torch.nn.utils.clip_grad_norm_(self.parameters_tensor.values(), 50.)
             self.optimizer_net.step()
-
-            ndarrays = parameters_to_ndarrays(self.parameters)
-            header_and_keys = ndarrays[:1+len(ndarrays[0])]
-            parameters_aggregated = ndarrays_to_parameters(
-                header_and_keys + [v.detach().cpu().numpy() for v in self.parameters_tensor]
-            )
-            self.parameters = parameters_aggregated
+            self.parameters = ndarrays_to_parameters(state_dicts_to_ndarrays({'enet': self.parameters_tensor}))
 
         else:
-            ndarrays = parameters_to_ndarrays(self.parameters)
-            header_and_keys = ndarrays[:1+len(ndarrays[0])]
-
-            weights, metrics, parameters = [], [], []
-            for future in finished_fs:
-                """Convert finished future into either a result or a failure."""
-                # Check if there was an exception
-                assert future.exception() is None
-                # Successfully received a result from a client
-                w, m, p = future.result()
-                weights.append(w)
-                metrics.append(m)
-                parameters.append((parameters_to_ndarrays(p)[len(header_and_keys):], w))
-
-            parameters_aggregated = ndarrays_to_parameters(
-                header_and_keys + aggregate(parameters)
-            )
-            self.parameters = parameters_aggregated
+            self.parameters = ndarrays_to_parameters(state_dicts_to_ndarrays({'tnet': state_dict}))
 
         # Aggregate custom metrics if aggregation fn was provided
-        metrics_aggregated = {}
+        metrics_aggregated = {'step': server_round}
         if self.fit_metrics_aggregation_fn:
-            metrics_aggregated = self.fit_metrics_aggregation_fn(
+            metrics_aggregated = {**metrics_aggregated, **self.fit_metrics_aggregation_fn(
                 [(w, mc) for w, mc in zip(weights, metrics)]
-            )
+            )}
         elif server_round == 1:  # Only log this warning once
             log(WARNING, "No fit_metrics_aggregation_fn provided")
-        metrics_aggregated = {**metrics_aggregated}
-        log(INFO, f'round_{server_round}: {metrics_aggregated}')
+        log(INFO, f'fit_round_{server_round}: {metrics_aggregated}')
         if wandb.run is not None:
-            wandb.log({'train': metrics_aggregated}, commit=False, step=server_round)
-        return metrics_aggregated
-
-    def evaluate_round(self, server_round: int, timeout: Optional[float]) -> Optional[Dict[str, Scalar]]:
-        """Validate current global model on a number of clients."""
-        if self.model_embed_type != 'none':
-            self.hnet.eval()
-            client_fn = self.eval_client_pefll
-        else:
-            client_fn = self.eval_client_fedavg
-
-        weights, metrics = [], []
-        for i in range(0, self.num_train_clients, self.num_available_clients):
-            cids = list(range(i, min(i + self.num_available_clients, self.num_train_clients)))
-            # Evaluate model on a sample of available clients
-            with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                submitted_fs = {
-                    executor.submit(client_fn, client, cid, device)
-                    for client, cid, device in zip(*self.sample_clients(cids))
-                }
-                # Handled in the respective communication stack
-                finished_fs, _ = concurrent.futures.wait(fs=submitted_fs, timeout=None)
-
-            weights, metrics = [], []
-            for future in finished_fs:
-                """Convert finished future into either a result or a failure."""
-                # Check if there was an exception
-                assert future.exception() is None
-                # Successfully received a result from a client
-                w, m = future.result()
-                weights.append(w)
-                metrics.append(m)
-
-        metrics_aggregated = self.evaluate_metrics_aggregation_fn([(w, m) for w, m in zip(weights, metrics)])
-        log(INFO, f'round_{server_round}: {metrics_aggregated}')
-        if wandb.run is not None:
-            wandb.log({'val': metrics_aggregated}, commit=True, step=server_round)
+            wandb.log({'fit': metrics_aggregated}, commit=False, step=server_round)
         return metrics_aggregated
 
     def fit_client_pefll(
@@ -500,11 +450,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             device=self.server_device,
         ))
         tnet_state_dict = self.hnet(embedding)
-        parameters = ndarrays_to_parameters([
-            np.asarray(['tnet']),
-            np.asarray(list(tnet_state_dict.keys())),
-            *[v.detach().cpu().numpy() for v in tnet_state_dict.values()],
-        ])
+        parameters = ndarrays_to_parameters(state_dicts_to_ndarrays({'tnet': tnet_state_dict}))
 
         res = client.fit(FitIns(parameters, {
             'cid': cid,
@@ -520,16 +466,17 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
         metrics = {**metrics, **res.metrics}
         weight = res.num_examples
 
+        tnet_state_dict_4 = ndarrays_to_state_dicts(parameters_to_ndarrays(res.parameters), self.server_device)['tnet']
         loss = torch.stack([
-            ((o.detach() - torch.tensor(v, device=self.server_device)) * o).sum()
-            for o, v in zip(tnet_state_dict.values(), parameters_to_ndarrays(res.parameters)[2:])
-        ])
-        loss = loss.sum()
+            ((tnet_state_dict[k].detach() - tnet_state_dict_4[k]) * tnet_state_dict[k]).sum()
+            for k in tnet_state_dict.keys()
+        ]).sum()
         metrics = {**metrics, 'loss_h': float(loss)}
 
         grads = torch.autograd.grad(loss, [embedding] + list(self.hnet.parameters()))
+
+        self.hnet_grads.put((grads[1:], weight), block=True, timeout=None)
         parameters = ndarrays_to_parameters([grads[0].detach().cpu().numpy()])
-        hnet_grad_dict = {k: v for k, v in zip(self.hnet.state_dict().keys(), grads[1:])}
 
         res = client.fit(FitIns(parameters, {
             'cid': cid,
@@ -541,13 +488,8 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
         metrics = {**metrics, **res.metrics}
 
         # Convert results
-        ndarrays = parameters_to_ndarrays(res.parameters)
-        header_and_keys = ndarrays[:1 + len(ndarrays[0])]
-        enet_grad_dict = {
-            k: torch.tensor(v, device=self.server_device)
-            for k, v in zip(header_and_keys[1], ndarrays[len(header_and_keys):])
-        }
-        return weight, metrics, list(hnet_grad_dict.values()), list(enet_grad_dict.values())
+        enet_grad_dict = ndarrays_to_state_dicts(parameters_to_ndarrays(res.parameters), self.server_device)['enet']
+        return weight, metrics, enet_grad_dict
 
     def fit_client_fedavg(
             self,
@@ -567,16 +509,55 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             'client_target_num_batches': self.client_target_num_batches,
         }), timeout=None)
         assert res.status.code == Code.OK
-        return res.num_examples, res.metrics, res.parameters
+        state_dict = ndarrays_to_state_dicts(parameters_to_ndarrays(res.parameters), self.server_device)['tnet']
+        return res.num_examples, res.metrics, state_dict
 
-    def eval_client_pefll(
+    def evaluate_round(self, server_round: int, timeout: Optional[float] = None) -> Optional[Dict[str, Scalar]]:
+        """Validate current global model on a number of clients."""
+        if self.model_embed_type != 'none':
+            self.hnet.eval()
+            client_fn = self.evaluate_client_pefll
+        else:
+            client_fn = self.evaluate_client_fedavg
+
+        weights, metrics = [], []
+        for i in range(0, self.num_train_clients, self.num_available_clients):
+            cids = list(range(i, min(i + self.num_available_clients, self.num_train_clients)))
+            # Evaluate model on a sample of available clients
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                submitted_fs = {
+                    executor.submit(client_fn, client, cid, device)
+                    for client, cid, device in zip(*self.sample_clients(cids))
+                }
+                # Handled in the respective communication stack
+                finished_fs, _ = concurrent.futures.wait(fs=submitted_fs, timeout=timeout)
+
+            weights, metrics = [], []
+            for future in finished_fs:
+                """Convert finished future into either a result or a failure."""
+                # Check if there was an exception
+                assert future.exception() is None
+                # Successfully received a result from a client
+                w, m = future.result()
+                weights.append(w)
+                metrics.append(m)
+
+        metrics_aggregated = {'step': server_round}
+        metrics_aggregated = {**metrics_aggregated, **self.evaluate_metrics_aggregation_fn(
+            [(w, m) for w, m in zip(weights, metrics)]
+        )}
+        log(INFO, f'eval_round_{server_round}: {metrics_aggregated}')
+        if wandb.run is not None:
+            wandb.log({'eval': metrics_aggregated}, commit=True, step=server_round)
+        return metrics_aggregated
+
+    def evaluate_client_pefll(
             self,
             client: ClientProxy,
             cid: int,
             device: str,
     ):
         """Refine parameters on a single client."""
-
         metrics = {}
         res = client.fit(ins=FitIns(self.parameters, {
             'cid': cid,
@@ -594,11 +575,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
         ))
         with torch.no_grad():
             tnet_state_dict = self.hnet(embedding)
-        parameters = ndarrays_to_parameters([
-            np.asarray(['tnet']),
-            np.asarray(list(tnet_state_dict.keys())),
-            *[v.detach().cpu().numpy() for v in tnet_state_dict.values()],
-        ])
+        parameters = ndarrays_to_parameters(state_dicts_to_ndarrays({'tnet': tnet_state_dict}))
 
         res = client.fit(FitIns(parameters, {
             'cid': cid,
@@ -613,7 +590,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
 
         return weight, metrics
 
-    def eval_client_fedavg(
+    def evaluate_client_fedavg(
             self,
             client: ClientProxy,
             cid: int,
@@ -628,66 +605,6 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
         }), timeout=None)
         assert res.status.code == Code.OK
         return res.num_examples, res.metrics
-
-    def execute_round(
-            self,
-            fn_name: str,
-            client_instructions: List[Tuple[
-                ClientProxy, EvaluateIns | FitIns | GetParametersIns | GetPropertiesIns | ReconnectIns]],
-            server_round: int,
-            timeout: Optional[float]
-    ) -> Optional[Tuple[
-        List[Tuple[ClientProxy, FitRes | EvaluateRes | GetParametersRes | GetPropertiesRes | DisconnectRes]],
-        List[Union[Tuple[ClientProxy, FitRes], BaseException]],
-    ]]:
-        """Perform a single round of communication."""
-        if not client_instructions:
-            log(INFO, "execute_round %s: no clients selected, cancel", server_round)
-            return None
-        # log(DEBUG, "execute_round %s: strategy sampled %s clients (out of %s)",
-        #     server_round, len(client_instructions), self.client_manager().num_available())
-        # Collect `execute` results from all clients participating in this round
-        """Refine parameters concurrently on all selected clients."""
-
-        def client_execute_fn(
-                client: ClientProxy,
-                ins: EvaluateIns | FitIns | GetParametersIns | GetPropertiesIns | ReconnectIns,
-                to: Optional[float]
-        ) -> Tuple[ClientProxy, EvaluateRes | FitRes | GetParametersRes | GetPropertiesRes | DisconnectRes]:
-            """Refine parameters on a single client."""
-            fit_res = client.__getattribute__(fn_name)(ins=ins, timeout=to)
-            return client, fit_res
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            submitted_fs = {
-                executor.submit(client_execute_fn, client_proxy, ins, timeout)
-                for client_proxy, ins in client_instructions
-            }
-            # Handled in the respective communication stack
-            finished_fs, _ = concurrent.futures.wait(fs=submitted_fs, timeout=None)
-
-        # Gather results
-        results: List[Tuple[ClientProxy, FitRes]] = []
-        failures: List[Union[Tuple[ClientProxy, FitRes], BaseException]] = []
-        for future in finished_fs:
-            """Convert finished future into either a result or a failure."""
-            # Check if there was an exception
-            failure = future.exception()
-            if failure is not None:
-                failures.append(failure)
-            else:
-                # Successfully received a result from a client
-                result: Tuple[ClientProxy, FitRes] = future.result()
-                _, res = result
-                # Check result status code
-                if res.status.code == Code.OK:
-                    results.append(result)
-                else:
-                    # Not successful, client returned a result where the status code is not OK
-                    failures.append(result)
-        # log(DEBUG, "execute_round %s received %s results and %s failures", server_round, len(results), len(failures))
-        assert not failures
-        return results, failures
 
 
 def make_server(args: argparse.Namespace):

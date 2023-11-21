@@ -9,7 +9,7 @@ import torch
 import wandb
 
 
-def aggregate_tensor_old(results: List[Tuple[List[torch.Tensor], int]]) -> List[torch.Tensor]:
+def aggregate_tensor(results: List[Tuple[List[torch.Tensor], int]]) -> List[torch.Tensor]:
     """Compute weighted average."""
     # flwr.server.strategy.aggregate.aggregate
     # Calculate the total number of examples used during training
@@ -28,7 +28,7 @@ def aggregate_tensor_old(results: List[Tuple[List[torch.Tensor], int]]) -> List[
     return weights_prime
 
 
-def aggregate_tensor(results: List[Tuple[List[torch.Tensor], int]]) -> List[torch.Tensor]:
+def aggregate_tensor_2(results: List[Tuple[List[torch.Tensor], int]]) -> List[torch.Tensor]:
     """Compute weighted average."""
     layer_updates: List[List[torch.Tensor]] = [x for x, _ in results]
     weight = torch.tensor([v for _, v in results], dtype=layer_updates[0][0].dtype, device=layer_updates[0][0].device)
@@ -48,12 +48,13 @@ def state_dicts_to_ndarrays(state_dicts: Dict[str, Dict[str, torch.Tensor]]) -> 
     return ndarrays
 
 
-def ndarrays_to_state_dicts(ndarrays: List[np.ndarray]) -> Dict[str, Dict[str, torch.Tensor]]:
+def ndarrays_to_state_dicts(ndarrays: List[np.ndarray], device: torch.device = torch.device('cpu')) \
+        -> Dict[str, Dict[str, torch.Tensor]]:
     state_dicts: Dict[str, Dict[str, torch.Tensor]] = {}
     for i, net_name in enumerate(ndarrays[0]):
         keys = ndarrays[1 + i]
         vals = ndarrays[1 + sum([len(k) for k in ndarrays[:1 + i]]): 1 + sum([len(k) for k in ndarrays[:2 + i]])]
-        state_dicts[net_name] = {k: torch.tensor(v) for k, v in zip(keys, vals)}
+        state_dicts[net_name] = {k: torch.tensor(v, device=device) for k, v in zip(keys, vals)}
     return state_dicts
 
 
