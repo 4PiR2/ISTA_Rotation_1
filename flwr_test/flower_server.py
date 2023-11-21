@@ -28,6 +28,7 @@ from flwr.common.logger import log
 from flwr.server.client_manager import ClientManager, SimpleClientManager
 from flwr.server.client_proxy import ClientProxy
 from flwr.server.history import History
+from flwr.server.strategy.aggregate import aggregate
 import numpy as np
 import torch
 import wandb
@@ -358,48 +359,72 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
         """Perform a single round of federated averaging."""
         if self.model_embed_type != 'none':
             self.hnet.train()
+            client_fn = self.fit_client_pefll
+        else:
+            client_fn = self.fit_client_fedavg
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             submitted_fs = {
-                executor.submit(self.fit_client, client, cid, device)
+                executor.submit(client_fn, client, cid, device)
                 for client, cid, device in zip(*self.sample_clients())
             }
             # Handled in the respective communication stack
             finished_fs, _ = concurrent.futures.wait(fs=submitted_fs, timeout=None)
 
-        weights, metrics, hnet_grads, enet_grads = [], [], [], []
-        for future in finished_fs:
-            """Convert finished future into either a result or a failure."""
-            # Check if there was an exception
-            assert future.exception() is None
-            # Successfully received a result from a client
-            w, m, hg, eg = future.result()
-            weights.append(w)
-            metrics.append(m)
-            hnet_grads.append((hg, w))
-            enet_grads.append((eg, w))
+        if self.model_embed_type != 'none':
+            weights, metrics, hnet_grads, enet_grads = [], [], [], []
+            for future in finished_fs:
+                """Convert finished future into either a result or a failure."""
+                # Check if there was an exception
+                assert future.exception() is None
+                # Successfully received a result from a client
+                w, m, hg, eg = future.result()
+                weights.append(w)
+                metrics.append(m)
+                hnet_grads.append((hg, w))
+                enet_grads.append((eg, w))
 
-        hnet_grad = aggregate_tensor(hnet_grads)
-        enet_grad = aggregate_tensor(enet_grads)
+            hnet_grad = aggregate_tensor(hnet_grads)
+            enet_grad = aggregate_tensor(enet_grads)
 
-        self.optimizer_hnet.zero_grad()
-        for p, g in zip(self.hnet.parameters(), hnet_grad):
-            p.grad = g
-        torch.nn.utils.clip_grad_norm_(self.hnet.parameters(), 50.)
-        self.optimizer_hnet.step()
+            self.optimizer_hnet.zero_grad()
+            for p, g in zip(self.hnet.parameters(), hnet_grad):
+                p.grad = g
+            torch.nn.utils.clip_grad_norm_(self.hnet.parameters(), 50.)
+            self.optimizer_hnet.step()
 
-        self.optimizer_net.zero_grad()
-        for p, g in zip(self.parameters_tensor, enet_grad):
-            p.grad = g
-        torch.nn.utils.clip_grad_norm_(self.parameters_tensor, 50.)
-        self.optimizer_net.step()
+            self.optimizer_net.zero_grad()
+            for p, g in zip(self.parameters_tensor, enet_grad):
+                p.grad = g
+            torch.nn.utils.clip_grad_norm_(self.parameters_tensor, 50.)
+            self.optimizer_net.step()
 
-        ndarrays = parameters_to_ndarrays(self.parameters)
-        header_and_keys = ndarrays[:1+len(ndarrays[0])]
-        parameters_aggregated = ndarrays_to_parameters(
-            header_and_keys + [v.detach().cpu().numpy() for v in self.parameters_tensor]
-        )
-        self.parameters = parameters_aggregated
+            ndarrays = parameters_to_ndarrays(self.parameters)
+            header_and_keys = ndarrays[:1+len(ndarrays[0])]
+            parameters_aggregated = ndarrays_to_parameters(
+                header_and_keys + [v.detach().cpu().numpy() for v in self.parameters_tensor]
+            )
+            self.parameters = parameters_aggregated
+
+        else:
+            ndarrays = parameters_to_ndarrays(self.parameters)
+            header_and_keys = ndarrays[:1+len(ndarrays[0])]
+
+            weights, metrics, parameters = [], [], []
+            for future in finished_fs:
+                """Convert finished future into either a result or a failure."""
+                # Check if there was an exception
+                assert future.exception() is None
+                # Successfully received a result from a client
+                w, m, p = future.result()
+                weights.append(w)
+                metrics.append(m)
+                parameters.append((parameters_to_ndarrays(p)[len(header_and_keys):], w))
+
+            parameters_aggregated = ndarrays_to_parameters(
+                header_and_keys + aggregate(parameters)
+            )
+            self.parameters = parameters_aggregated
 
         # Aggregate custom metrics if aggregation fn was provided
         metrics_aggregated = {}
@@ -419,6 +444,9 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
         """Validate current global model on a number of clients."""
         if self.model_embed_type != 'none':
             self.hnet.eval()
+            client_fn = self.eval_client_pefll
+        else:
+            client_fn = self.eval_client_fedavg
 
         weights, metrics = [], []
         for i in range(0, self.num_train_clients, self.num_available_clients):
@@ -426,7 +454,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             # Evaluate model on a sample of available clients
             with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                 submitted_fs = {
-                    executor.submit(self.eval_client, client, cid, device)
+                    executor.submit(client_fn, client, cid, device)
                     for client, cid, device in zip(*self.sample_clients(cids))
                 }
                 # Handled in the respective communication stack
@@ -448,7 +476,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             wandb.log({'val': metrics_aggregated}, commit=True, step=server_round)
         return metrics_aggregated
 
-    def fit_client(
+    def fit_client_pefll(
             self,
             client: ClientProxy,
             cid: int,
@@ -521,7 +549,27 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
         }
         return weight, metrics, list(hnet_grad_dict.values()), list(enet_grad_dict.values())
 
-    def eval_client(
+    def fit_client_fedavg(
+            self,
+            client: ClientProxy,
+            cid: int,
+            device: str,
+    ):
+        """Refine parameters on a single client."""
+        res = client.fit(ins=FitIns(self.parameters, {
+            'cid': cid,
+            'device': device,
+            'stage': 1,
+            'is_eval': False,
+            'client_optimizer_target_lr': self.client_optimizer_target_lr,
+            'client_optimizer_target_momentum': self.client_optimizer_target_momentum,
+            'client_optimizer_target_weight_decay': self.client_optimizer_target_weight_decay,
+            'client_target_num_batches': self.client_target_num_batches,
+        }), timeout=None)
+        assert res.status.code == Code.OK
+        return res.num_examples, res.metrics, res.parameters
+
+    def eval_client_pefll(
             self,
             client: ClientProxy,
             cid: int,
@@ -564,6 +612,22 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
         weight = res.num_examples
 
         return weight, metrics
+
+    def eval_client_fedavg(
+            self,
+            client: ClientProxy,
+            cid: int,
+            device: str,
+    ):
+        """Refine parameters on a single client."""
+        res = client.fit(FitIns(self.parameters, {
+            'cid': cid,
+            'device': device,
+            'stage': 2,
+            'is_eval': True,
+        }), timeout=None)
+        assert res.status.code == Code.OK
+        return res.num_examples, res.metrics
 
     def execute_round(
             self,
