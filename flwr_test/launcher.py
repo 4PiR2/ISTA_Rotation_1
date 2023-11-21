@@ -53,6 +53,7 @@ def main():
 
         finish_wandb()
     else:
+        run(['pkill', '-9', '-f', '-e', '-c', 'wandb-service'])
         run(['pkill', '-9', '-f', '-e', '-c', 'python3 flower_server.py'])
         run(['pkill', '-9', '-f', '-e', '-c', 'python3 flower_client.py'])
 

@@ -28,18 +28,19 @@ from flwr.common.logger import log
 from flwr.server.client_manager import ClientManager, SimpleClientManager
 from flwr.server.client_proxy import ClientProxy
 from flwr.server.history import History
+from flwr.server.strategy.aggregate import aggregate
 import numpy as np
 import torch
 import wandb
 
-from models import CNNHyper
+from PeFLL.models import CNNHyper
 
 from parse_args import parse_args
 from utils import aggregate_tensor, ndarrays_to_state_dicts, state_dicts_to_ndarrays, init_wandb, finish_wandb, \
     get_pefll_checkpoint
 
 
-class FlowerStrategy(flwr.server.strategy.FedAvg):
+class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
     def __init__(
             self,
             mode: str,
@@ -77,6 +78,8 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
             client_eval_mask_absent: bool = False,
             client_eval_embed_train_split: bool = True,
     ):
+        flwr.server.Server.__init__(self, client_manager=SimpleClientManager(), strategy=self)
+
         def weighted_average(metrics: List[Tuple[int, Metrics]]) -> Metrics:
             # Aggregate and return custom metric (weighted average)
             if len(metrics) <= 0:
@@ -100,7 +103,8 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
                 num_available_clients = int(1e9)
         self.num_available_clients: int = num_available_clients
 
-        super().__init__(
+        flwr.server.strategy.FedAvg.__init__(
+            self,
             fraction_fit=1e-9,  # Sample % of available clients for training
             fraction_evaluate=1e-9,  # Sample % of available clients for evaluation
             min_fit_clients=num_step_clients,
@@ -272,256 +276,43 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
             client_config_pairs.append((client, GetPropertiesIns(conf)))
         return client_config_pairs
 
-    def configure_fit(
+    def sample_clients(
             self,
-            server_round: int = -1,
-            parameters: Parameters | List[Parameters] | None = None,
-            client_manager: Optional[ClientManager] = None,
-            stage: int = -1,
             cids: Optional[List[int]] = None,
-    ) -> List[Tuple[ClientProxy, FitIns | EvaluateIns | GetPropertiesIns]]:
-        match stage:
-            case 1 | 2 | 3 | 6:
-                # Sample clients
+    ) -> Tuple[List[ClientProxy], List[int], List[str]]:
+        client_manager = self.client_manager()
+        if cids is None:
+            sample_size, min_num_clients = self.num_fit_clients(client_manager.num_available())
+        else:
+            sample_size = min_num_clients = len(cids)
+        clients = client_manager.sample(num_clients=sample_size, min_num_clients=min_num_clients)
+        all_cids = sorted(list(client_manager.all().keys()))
+
+        match self.mode:
+            case 'multiplex':
                 if cids is None:
-                    sample_size, min_num_clients = self.num_fit_clients(client_manager.num_available())
-                else:
-                    sample_size = min_num_clients = len(cids)
-                clients = client_manager.sample(num_clients=sample_size, min_num_clients=min_num_clients)
-                all_cids = sorted(list(client_manager.all().keys()))
-
-                match self.mode:
-                    case 'multiplex':
-                        if cids is None:
-                            cids = np.random.choice(
-                                np.arange(self.num_train_clients),
-                                len(clients),
-                                replace=False
-                            ).tolist()
-                    case 'simulated':
-                        cids = [int(client.cid) for client in clients]
-                    case 'distributed':
-                        cids = [all_cids.index(client.cid) for client in clients]
-                    case _:
-                        cids = [None] * len(clients)
-
-                num_gpus = torch.cuda.device_count()
-                if num_gpus > 0:
-                    if self.mode == 'simulated':
-                        devices = ['cuda'] * len(clients)
-                    else:
-                        devices = [f'cuda:{all_cids.index(client.cid) % num_gpus}' for client in clients]
-                else:
-                    devices = ['cpu'] * len(clients)
-
-                common_configs = [{
-                    'cid': cid,
-                    'device': device,
-                } for cid, device in zip(cids, devices)]
-
-                parameters = [parameters] * len(clients)
-
-                match stage:
-                    case 1 | 2:
-                        pass
-                    case 3 | 6:
-                        self.stage_memory['clients'] = clients
-                        self.stage_memory['common_configs'] = common_configs
-                    case _:
-                        raise NotImplementedError
-
-            case 4 | 5 | 7:
-                clients = self.stage_memory['clients']
-                common_configs = self.stage_memory['common_configs']
+                    cids = np.random.choice(
+                        np.arange(self.num_train_clients),
+                        len(clients),
+                        replace=False
+                    ).tolist()
+            case 'simulated':
+                cids = [int(client.cid) for client in clients]
+            case 'distributed':
+                cids = [all_cids.index(client.cid) for client in clients]
             case _:
-                raise NotImplementedError
+                cids = [None] * len(clients)
 
-        match stage:
-            case 1 | 4:
-                stage_config = {
-                    'client_optimizer_target_lr': self.client_optimizer_target_lr,
-                    'client_optimizer_target_momentum': self.client_optimizer_target_momentum,
-                    'client_optimizer_target_weight_decay': self.client_optimizer_target_weight_decay,
-                    'client_target_num_batches': self.client_target_num_batches,
-                }
-            case 3:
-                stage_config = {
-                    'client_embed_num_batches': self.client_embed_num_batches,
-                }
-            case 6:
-                stage_config = {
-                    'client_eval_embed_train_split': self.client_eval_embed_train_split,
-                }
-            case 7:
-                stage_config = {
-                    'client_eval_mask_absent': self.client_eval_mask_absent,
-                }
-            case _:
-                stage_config = {}
+        num_gpus = torch.cuda.device_count()
+        if num_gpus > 0:
+            if self.mode == 'simulated':
+                devices = ['cuda'] * len(clients)
+            else:
+                devices = [f'cuda:{all_cids.index(client.cid) % num_gpus}' for client in clients]
+        else:
+            devices = ['cpu'] * len(clients)
 
-        client_config_pairs: List[Tuple[ClientProxy, FitIns | EvaluateIns]] = []
-        for i, client in enumerate(clients):
-            conf = {
-                **common_configs[i],
-                'stage': stage,
-                'is_eval': (stage in [2, 6, 7]) * (2 if self.eval_test else 1),
-                **stage_config,
-            }
-            client_config_pairs.append((client, FitIns(parameters[i], conf)))
-        # Return client/config pairs
-        return client_config_pairs
-
-    def configure_evaluate(self, *args, **kwargs):
-        raise NotImplementedError
-
-    def aggregate_fit(
-            self,
-            server_round: int,
-            results: List[Tuple[ClientProxy, FitRes]],
-            failures: List[Union[Tuple[ClientProxy, FitRes], BaseException]],
-            stage: int = -1,
-    ) -> Tuple[Parameters | List[Parameters] | None, Dict[str, Scalar]]:
-        """Aggregate fit results using weighted average."""
-        if not results:
-            return None, {}
-        # Do not aggregate if there are failures and failures are not accepted
-        if not self.accept_failures and failures:
-            return None, {}
-
-        fit_metrics = {}
-        match stage:
-            case 1:
-                # Convert results
-                header_and_keys = [np.array([])]
-                weights_results = []
-                for _, fit_res in results:
-                    ndarrays = parameters_to_ndarrays(fit_res.parameters)
-                    header_and_keys = ndarrays[:1+len(ndarrays[0])]
-                    vals = [torch.tensor(v, device=self.server_device) for v in ndarrays[len(header_and_keys):]]
-                    weights_results.append((vals, fit_res.num_examples))
-                aggregated_vals = aggregate_tensor(weights_results)
-                parameters_aggregated = ndarrays_to_parameters(
-                    header_and_keys + [v.detach().cpu().numpy() for v in aggregated_vals]
-                )
-
-            case 5:
-                # Convert results
-                header_and_keys = [np.array([])]
-                vals = []
-                for _, fit_res in results:
-                    ndarrays = parameters_to_ndarrays(fit_res.parameters)
-                    header_and_keys = ndarrays[:1+len(ndarrays[0])]
-                    vals.append([torch.tensor(v, device=self.server_device) for v in ndarrays[len(header_and_keys):]])
-                aggregated_vals = [torch.stack(layer_updates, dim=0).sum(dim=0) for layer_updates in zip(*vals)]
-                self.optimizer_net.zero_grad()
-                for p, g in zip(self.parameters_tensor, aggregated_vals):
-                    p.grad = g
-                self.optimizer_net.step()
-                parameters_aggregated = ndarrays_to_parameters(
-                    header_and_keys + [v.detach().cpu().numpy() for v in self.parameters_tensor]
-                )
-
-            case 2 | 7:
-                parameters_aggregated = None
-
-            case 3 | 4 | 6:
-                # align results order with clients order
-                clients: List[ClientProxy] = self.stage_memory['clients']
-                results = [results[i] for i in np.argsort([client.cid for client, _ in results])]
-                results = [results[j] for j in np.argsort(np.argsort([client.cid for client in clients]))]
-
-                match stage:
-                    case 3 | 6:
-                        embeddings = torch.nn.Parameter(torch.tensor(
-                            np.asarray([parameters_to_ndarrays(fit_res.parameters)[0] for _, fit_res in results]),
-                            device=self.server_device,
-                        ))
-
-                        match stage:
-                            case 3:
-                                self.hnet.train()
-                                hnet_out = self.hnet(embeddings)
-                            case 6:
-                                self.hnet.eval()
-                                with torch.no_grad():
-                                    hnet_out = self.hnet(embeddings)
-                            case _:
-                                raise NotImplementedError
-
-                        tnet_state_dicts = [{k: w for k, w in zip(hnet_out.keys(), ws)} for ws in zip(*hnet_out.values())]
-                        self.stage_memory['embeddings'] = embeddings
-                        self.stage_memory['tnet_state_dicts'] = tnet_state_dicts
-
-                        # tnet_parameters
-                        parameters_aggregated = [ndarrays_to_parameters([
-                            np.asarray(['tnet']),
-                            np.asarray(list(tnet_state_dict.keys())),
-                            *[v.detach().cpu().numpy() for v in tnet_state_dict.values()],
-                        ]) for tnet_state_dict in tnet_state_dicts]
-
-                    case 4:
-                        embeddings = self.stage_memory['embeddings']
-                        tnet_state_dicts = self.stage_memory['tnet_state_dicts']
-
-                        result_values = [[
-                            torch.tensor(v, device=self.server_device)
-                            for v in parameters_to_ndarrays(fit_res.parameters)[2:]
-                        ] for _, fit_res in results]
-
-                        losses = torch.stack([torch.stack([
-                            ((o.detach() - v) * o).sum() for o, v in zip(state_dict.values(), result_value)
-                        ], dim=0) for state_dict, result_value in zip(tnet_state_dicts, result_values)], dim=0)
-                        losses = losses.sum(dim=-1)
-
-                        weights = torch.tensor(
-                            [fit_res.num_examples for _, fit_res in results],
-                            dtype=losses.dtype,
-                            device=self.server_device,
-                        )
-                        weights /= weights.sum()
-                        loss = (losses * weights).sum()
-                        fit_metrics['loss_h'] = float(loss)
-
-                        self.optimizer_hnet.zero_grad()
-                        loss.backward()
-                        torch.nn.utils.clip_grad_norm_(self.hnet.parameters(), 50.)
-                        self.optimizer_hnet.step()
-
-                        parameters_aggregated = [
-                            ndarrays_to_parameters([grad]) for grad in embeddings.grad.detach().cpu().numpy()
-                        ]
-
-                    case _:
-                        raise NotImplementedError
-
-            case _:
-                raise NotImplementedError
-
-        # Aggregate custom metrics if aggregation fn was provided
-        metrics_aggregated = {}
-        if self.fit_metrics_aggregation_fn:
-            metrics_aggregated = self.fit_metrics_aggregation_fn(
-                [(res.num_examples, res.metrics) for _, res in results]
-            )
-        elif server_round == 1:  # Only log this warning once
-            log(WARNING, "No fit_metrics_aggregation_fn provided")
-        metrics_aggregated = {**fit_metrics, **metrics_aggregated}
-        log(INFO, f'round_{server_round}_stage_{stage}: {metrics_aggregated}')
-        return parameters_aggregated, metrics_aggregated
-
-    def aggregate_evaluate(
-            self,
-            server_round: int,
-            results: List[Tuple[ClientProxy, EvaluateRes]],
-            failures: List[Union[Tuple[ClientProxy, EvaluateRes], BaseException]],
-    ) -> Tuple[Optional[float], Dict[str, Scalar]]:
-        raise NotImplementedError
-
-
-class FlowerServer(flwr.server.Server):
-    def __init__(self, client_manager: ClientManager, strategy: FlowerStrategy):
-        super().__init__(client_manager=client_manager, strategy=strategy)
-        self.strategy: FlowerStrategy = self.strategy
+        return clients, cids, devices
 
     def fit(self, num_rounds: int, timeout: Optional[float]) -> History:
         """Run federated averaging for a number of rounds."""
@@ -529,11 +320,11 @@ class FlowerServer(flwr.server.Server):
         client_manager = self.client_manager()
 
         log(INFO, 'Waiting until all clients are ready')
-        while client_manager.num_available() < self.strategy.min_available_clients:
+        while client_manager.num_available() < self.min_available_clients:
             pass
 
         log(INFO, "Initializing clients")
-        get_properties_instructions = self.strategy.configure_get_properties(client_manager)
+        get_properties_instructions = self.configure_get_properties(client_manager)
         _, get_properties_failures = self.execute_round(
             fn_name='get_properties',
             client_instructions=get_properties_instructions,
@@ -544,18 +335,18 @@ class FlowerServer(flwr.server.Server):
 
         # Initialize parameters
         log(INFO, "Initializing global parameters")
-        self.parameters = self.strategy.initialize_parameters(client_manager=client_manager)
+        self.parameters = self.initialize_parameters(client_manager=client_manager)
 
         # Run federated learning for num_rounds
         log(INFO, "FL starting")
         start_time = timeit.default_timer()
 
         self.evaluate_round(0, timeout)
-        for server_round in range(1 + self.strategy.init_round, 1 + num_rounds):
+        for server_round in range(1 + self.init_round, 1 + num_rounds):
             self.fit_round(server_round, timeout)
-            if server_round % self.strategy.eval_interval:
+            if server_round % self.eval_interval:
                 continue
-            self.strategy.save_model(self.parameters, server_round)  # save model checkpoint
+            self.save_model(self.parameters, server_round)  # save model checkpoint
             self.evaluate_round(server_round, timeout)
 
         # Bookkeeping
@@ -563,6 +354,280 @@ class FlowerServer(flwr.server.Server):
         elapsed = end_time - start_time
         log(INFO, "FL finished in %s", elapsed)
         return history
+
+    def fit_round(self, server_round: int, cids: List[int] = None) -> Optional[Dict[str, Scalar]]:
+        """Perform a single round of federated averaging."""
+        if self.model_embed_type != 'none':
+            self.hnet.train()
+            client_fn = self.fit_client_pefll
+        else:
+            client_fn = self.fit_client_fedavg
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            submitted_fs = {
+                executor.submit(client_fn, client, cid, device)
+                for client, cid, device in zip(*self.sample_clients())
+            }
+            # Handled in the respective communication stack
+            finished_fs, _ = concurrent.futures.wait(fs=submitted_fs, timeout=None)
+
+        if self.model_embed_type != 'none':
+            weights, metrics, hnet_grads, enet_grads = [], [], [], []
+            for future in finished_fs:
+                """Convert finished future into either a result or a failure."""
+                # Check if there was an exception
+                assert future.exception() is None
+                # Successfully received a result from a client
+                w, m, hg, eg = future.result()
+                weights.append(w)
+                metrics.append(m)
+                hnet_grads.append((hg, w))
+                enet_grads.append((eg, w))
+
+            hnet_grad = aggregate_tensor(hnet_grads)
+            enet_grad = aggregate_tensor(enet_grads)
+
+            self.optimizer_hnet.zero_grad()
+            for p, g in zip(self.hnet.parameters(), hnet_grad):
+                p.grad = g
+            torch.nn.utils.clip_grad_norm_(self.hnet.parameters(), 50.)
+            self.optimizer_hnet.step()
+
+            self.optimizer_net.zero_grad()
+            for p, g in zip(self.parameters_tensor, enet_grad):
+                p.grad = g
+            torch.nn.utils.clip_grad_norm_(self.parameters_tensor, 50.)
+            self.optimizer_net.step()
+
+            ndarrays = parameters_to_ndarrays(self.parameters)
+            header_and_keys = ndarrays[:1+len(ndarrays[0])]
+            parameters_aggregated = ndarrays_to_parameters(
+                header_and_keys + [v.detach().cpu().numpy() for v in self.parameters_tensor]
+            )
+            self.parameters = parameters_aggregated
+
+        else:
+            ndarrays = parameters_to_ndarrays(self.parameters)
+            header_and_keys = ndarrays[:1+len(ndarrays[0])]
+
+            weights, metrics, parameters = [], [], []
+            for future in finished_fs:
+                """Convert finished future into either a result or a failure."""
+                # Check if there was an exception
+                assert future.exception() is None
+                # Successfully received a result from a client
+                w, m, p = future.result()
+                weights.append(w)
+                metrics.append(m)
+                parameters.append((parameters_to_ndarrays(p)[len(header_and_keys):], w))
+
+            parameters_aggregated = ndarrays_to_parameters(
+                header_and_keys + aggregate(parameters)
+            )
+            self.parameters = parameters_aggregated
+
+        # Aggregate custom metrics if aggregation fn was provided
+        metrics_aggregated = {}
+        if self.fit_metrics_aggregation_fn:
+            metrics_aggregated = self.fit_metrics_aggregation_fn(
+                [(w, mc) for w, mc in zip(weights, metrics)]
+            )
+        elif server_round == 1:  # Only log this warning once
+            log(WARNING, "No fit_metrics_aggregation_fn provided")
+        metrics_aggregated = {**metrics_aggregated}
+        log(INFO, f'round_{server_round}: {metrics_aggregated}')
+        if wandb.run is not None:
+            wandb.log({'train': metrics_aggregated}, commit=False, step=server_round)
+        return metrics_aggregated
+
+    def evaluate_round(self, server_round: int, timeout: Optional[float]) -> Optional[Dict[str, Scalar]]:
+        """Validate current global model on a number of clients."""
+        if self.model_embed_type != 'none':
+            self.hnet.eval()
+            client_fn = self.eval_client_pefll
+        else:
+            client_fn = self.eval_client_fedavg
+
+        weights, metrics = [], []
+        for i in range(0, self.num_train_clients, self.num_available_clients):
+            cids = list(range(i, min(i + self.num_available_clients, self.num_train_clients)))
+            # Evaluate model on a sample of available clients
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                submitted_fs = {
+                    executor.submit(client_fn, client, cid, device)
+                    for client, cid, device in zip(*self.sample_clients(cids))
+                }
+                # Handled in the respective communication stack
+                finished_fs, _ = concurrent.futures.wait(fs=submitted_fs, timeout=None)
+
+            weights, metrics = [], []
+            for future in finished_fs:
+                """Convert finished future into either a result or a failure."""
+                # Check if there was an exception
+                assert future.exception() is None
+                # Successfully received a result from a client
+                w, m = future.result()
+                weights.append(w)
+                metrics.append(m)
+
+        metrics_aggregated = self.evaluate_metrics_aggregation_fn([(w, m) for w, m in zip(weights, metrics)])
+        log(INFO, f'round_{server_round}: {metrics_aggregated}')
+        if wandb.run is not None:
+            wandb.log({'val': metrics_aggregated}, commit=True, step=server_round)
+        return metrics_aggregated
+
+    def fit_client_pefll(
+            self,
+            client: ClientProxy,
+            cid: int,
+            device: str,
+    ):
+        """Refine parameters on a single client."""
+        metrics = {}
+
+        res = client.fit(ins=FitIns(self.parameters, {
+            'cid': cid,
+            'device': device,
+            'stage': 3,
+            'is_eval': False,
+            'client_embed_num_batches': self.client_embed_num_batches,
+        }), timeout=None)
+        assert res.status.code == Code.OK
+        metrics = {**metrics, **res.metrics}
+
+        embedding = torch.nn.Parameter(torch.tensor(
+            parameters_to_ndarrays(res.parameters)[0],
+            device=self.server_device,
+        ))
+        tnet_state_dict = self.hnet(embedding)
+        parameters = ndarrays_to_parameters([
+            np.asarray(['tnet']),
+            np.asarray(list(tnet_state_dict.keys())),
+            *[v.detach().cpu().numpy() for v in tnet_state_dict.values()],
+        ])
+
+        res = client.fit(FitIns(parameters, {
+            'cid': cid,
+            'device': device,
+            'stage': 4,
+            'is_eval': False,
+            'client_optimizer_target_lr': self.client_optimizer_target_lr,
+            'client_optimizer_target_momentum': self.client_optimizer_target_momentum,
+            'client_optimizer_target_weight_decay': self.client_optimizer_target_weight_decay,
+            'client_target_num_batches': self.client_target_num_batches,
+        }), timeout=None)
+        assert res.status.code == Code.OK
+        metrics = {**metrics, **res.metrics}
+        weight = res.num_examples
+
+        loss = torch.stack([
+            ((o.detach() - torch.tensor(v, device=self.server_device)) * o).sum()
+            for o, v in zip(tnet_state_dict.values(), parameters_to_ndarrays(res.parameters)[2:])
+        ])
+        loss = loss.sum()
+        metrics = {**metrics, 'loss_h': float(loss)}
+
+        grads = torch.autograd.grad(loss, [embedding] + list(self.hnet.parameters()))
+        parameters = ndarrays_to_parameters([grads[0].detach().cpu().numpy()])
+        hnet_grad_dict = {k: v for k, v in zip(self.hnet.state_dict().keys(), grads[1:])}
+
+        res = client.fit(FitIns(parameters, {
+            'cid': cid,
+            'device': device,
+            'stage': 5,
+            'is_eval': False,
+        }), timeout=None)
+        assert res.status.code == Code.OK
+        metrics = {**metrics, **res.metrics}
+
+        # Convert results
+        ndarrays = parameters_to_ndarrays(res.parameters)
+        header_and_keys = ndarrays[:1 + len(ndarrays[0])]
+        enet_grad_dict = {
+            k: torch.tensor(v, device=self.server_device)
+            for k, v in zip(header_and_keys[1], ndarrays[len(header_and_keys):])
+        }
+        return weight, metrics, list(hnet_grad_dict.values()), list(enet_grad_dict.values())
+
+    def fit_client_fedavg(
+            self,
+            client: ClientProxy,
+            cid: int,
+            device: str,
+    ):
+        """Refine parameters on a single client."""
+        res = client.fit(ins=FitIns(self.parameters, {
+            'cid': cid,
+            'device': device,
+            'stage': 1,
+            'is_eval': False,
+            'client_optimizer_target_lr': self.client_optimizer_target_lr,
+            'client_optimizer_target_momentum': self.client_optimizer_target_momentum,
+            'client_optimizer_target_weight_decay': self.client_optimizer_target_weight_decay,
+            'client_target_num_batches': self.client_target_num_batches,
+        }), timeout=None)
+        assert res.status.code == Code.OK
+        return res.num_examples, res.metrics, res.parameters
+
+    def eval_client_pefll(
+            self,
+            client: ClientProxy,
+            cid: int,
+            device: str,
+    ):
+        """Refine parameters on a single client."""
+
+        metrics = {}
+        res = client.fit(ins=FitIns(self.parameters, {
+            'cid': cid,
+            'device': device,
+            'stage': 6,
+            'is_eval': True,
+            'client_eval_embed_train_split': self.client_eval_embed_train_split,
+        }), timeout=None)
+        assert res.status.code == Code.OK
+        metrics = {**metrics, **res.metrics}
+
+        embedding = torch.nn.Parameter(torch.tensor(
+            parameters_to_ndarrays(res.parameters)[0],
+            device=self.server_device,
+        ))
+        with torch.no_grad():
+            tnet_state_dict = self.hnet(embedding)
+        parameters = ndarrays_to_parameters([
+            np.asarray(['tnet']),
+            np.asarray(list(tnet_state_dict.keys())),
+            *[v.detach().cpu().numpy() for v in tnet_state_dict.values()],
+        ])
+
+        res = client.fit(FitIns(parameters, {
+            'cid': cid,
+            'device': device,
+            'stage': 7,
+            'is_eval': True,
+            'client_eval_mask_absent': self.client_eval_mask_absent,
+        }), timeout=None)
+        assert res.status.code == Code.OK
+        metrics = {**metrics, **res.metrics}
+        weight = res.num_examples
+
+        return weight, metrics
+
+    def eval_client_fedavg(
+            self,
+            client: ClientProxy,
+            cid: int,
+            device: str,
+    ):
+        """Refine parameters on a single client."""
+        res = client.fit(FitIns(self.parameters, {
+            'cid': cid,
+            'device': device,
+            'stage': 2,
+            'is_eval': True,
+        }), timeout=None)
+        assert res.status.code == Code.OK
+        return res.num_examples, res.metrics
 
     def execute_round(
             self,
@@ -624,87 +689,9 @@ class FlowerServer(flwr.server.Server):
         assert not failures
         return results, failures
 
-    def fit_stage(
-            self,
-            server_round: int,
-            stage: int,
-            parameters: Parameters | List[Parameters] | None,
-            cids: List[int] = None,
-            timeout: Optional[float] = None,
-    ):
-        client_manager = self.client_manager()
-
-        # Get clients and their respective instructions from strategy
-        instructions = self.strategy.configure_fit(
-            server_round=server_round,
-            parameters=parameters,
-            client_manager=client_manager,
-            stage=stage,
-            cids=cids,
-        )
-        # Collect `fit` results from all clients participating in this round
-        results, failures = self.execute_round(
-            fn_name='fit',
-            client_instructions=instructions,
-            server_round=server_round,
-            timeout=timeout,
-        )
-        # Aggregate training results
-        parameters_out, metrics = self.strategy.aggregate_fit(
-            server_round=server_round,
-            results=results,
-            failures=failures,
-            stage=stage,
-        )
-        return parameters_out, metrics
-
-    def fit_round(self, server_round: int, timeout: Optional[float]) -> Optional[Dict[str, Scalar]]:
-        """Perform a single round of federated averaging."""
-        if self.strategy.model_embed_type == 'none':
-            stages = [1]
-        else:
-            stages = [3, 4, 5]
-
-        # Train model and replace previous global model
-        parameters = self.parameters
-        all_metrics = {'step': server_round}
-        for stage in stages:
-            parameters, metrics = self.fit_stage(server_round, stage, parameters, None, timeout=timeout)
-            all_metrics = {**all_metrics, **metrics}
-        self.parameters = parameters
-
-        if wandb.run is not None:
-            wandb.log({'train': all_metrics}, commit=False, step=server_round)
-
-        return None
-
-    def evaluate_round(self, server_round: int, timeout: Optional[float]) -> Optional[Dict[str, Scalar]]:
-        """Validate current global model on a number of clients."""
-        metrics = []
-        for i in range(0, self.strategy.num_train_clients, self.strategy.num_available_clients):
-            cids = list(range(i, min(i + self.strategy.num_available_clients, self.strategy.num_train_clients)))
-            # Evaluate model on a sample of available clients
-            if self.strategy.model_embed_type == 'none':
-                _, m = self.fit_stage(server_round, 2, self.parameters, cids, timeout=timeout)
-            else:
-                parameters, m6 = self.fit_stage(server_round, 6, self.parameters, cids, timeout=timeout)
-                _, m7 = self.fit_stage(server_round, 7, parameters, None, timeout=timeout)
-                m = {**m6, **m7}
-            metrics.append((len(cids), m))
-        metrics_aggregated = self.strategy.evaluate_metrics_aggregation_fn(metrics)
-        metrics_aggregated = {'step': server_round, **metrics_aggregated}
-
-        log(INFO, f'val_{server_round}: {metrics_aggregated}')
-
-        if wandb.run is not None:
-            wandb.log({'val': metrics_aggregated}, commit=True, step=server_round)
-
-        return metrics_aggregated
-
 
 def make_server(args: argparse.Namespace):
-    # Create strategy
-    strategy = FlowerStrategy(
+    return FlowerServer(
         mode=args.mode,
         num_train_clients=args.num_train_clients,
         num_step_clients=args.num_step_clients,
@@ -740,9 +727,6 @@ def make_server(args: argparse.Namespace):
         client_eval_mask_absent=args.client_eval_mask_absent,
         client_eval_embed_train_split=args.client_eval_embed_train_split,
     )
-
-    server = FlowerServer(client_manager=SimpleClientManager(), strategy=strategy)
-    return server
 
 
 def main():

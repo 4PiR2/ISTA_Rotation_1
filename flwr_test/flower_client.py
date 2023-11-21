@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Tuple
 import flwr
 from flwr.common import Config, Scalar, NDArrays
 from flwr.common.logger import log
+from grpc._channel import _MultiThreadedRendezvous
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
@@ -275,10 +276,13 @@ def main():
     while True:
         try:
             flwr.client.start_numpy_client(server_address=args.server_address, client=FlowerClient())
-        except Exception as e:
-            log(DEBUG, e)
-            log(DEBUG, traceback.format_exc())
+        except _MultiThreadedRendezvous:
+            log(DEBUG, 'Waiting for server')
             time.sleep(1.)
+        # except Exception as e:
+        #     log(DEBUG, e)
+        #     log(DEBUG, traceback.format_exc())
+        #     break
         else:
             break
 
