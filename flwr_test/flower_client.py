@@ -12,9 +12,10 @@ import torch
 from torch.utils.data import DataLoader
 
 from PeFLL.dataset import gen_random_loaders
-from PeFLL.models import CNNTarget, CNNEmbed, MLPEmbed
+from PeFLL.models import CNNTarget, MLPEmbed
 from PeFLL.utils import set_seed
 
+from models import CNNEmbed
 from parse_args import parse_args
 from utils import state_dicts_to_ndarrays, ndarrays_to_state_dicts
 
@@ -163,10 +164,10 @@ class FlowerClient(flwr.client.NumPyClient):
         label_all = torch.cat(label_all, dim=0)
 
         if not is_eval:
-            embedding = self.enet((image_all, label_all)).mean(dim=0)
+            embedding = self.enet(image_all, label_all).mean(dim=0)
         else:
             with torch.no_grad():
-                embedding = self.enet((image_all, label_all)).mean(dim=0)
+                embedding = self.enet(image_all, label_all).mean(dim=0)
 
         embedding_ndarray = embedding.detach().cpu().numpy()
         label_count = label_all.sum(dim=0)

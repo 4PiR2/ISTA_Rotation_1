@@ -32,7 +32,7 @@ import numpy as np
 import torch
 import wandb
 
-from PeFLL.models import CNNHyper
+from models import CNNHyper
 
 from parse_args import parse_args
 from utils import aggregate_tensor, ndarrays_to_state_dicts, state_dicts_to_ndarrays, init_wandb, finish_wandb, \
@@ -440,14 +440,15 @@ class FlowerStrategy(flwr.server.strategy.FedAvg):
                         match stage:
                             case 3:
                                 self.hnet.train()
-                                tnet_state_dicts = [self.hnet(embedding) for embedding in embeddings]
+                                hnet_out = self.hnet(embeddings)
                             case 6:
                                 self.hnet.eval()
                                 with torch.no_grad():
-                                    tnet_state_dicts = [self.hnet(embedding) for embedding in embeddings]
+                                    hnet_out = self.hnet(embeddings)
                             case _:
                                 raise NotImplementedError
 
+                        tnet_state_dicts = [{k: w for k, w in zip(hnet_out.keys(), ws)} for ws in zip(*hnet_out.values())]
                         self.stage_memory['embeddings'] = embeddings
                         self.stage_memory['tnet_state_dicts'] = tnet_state_dicts
 
@@ -666,7 +667,7 @@ class FlowerServer(flwr.server.Server):
 
         # Train model and replace previous global model
         parameters = self.parameters
-        all_metrics = {}
+        all_metrics = {'step': server_round}
         for stage in stages:
             parameters, metrics = self.fit_stage(server_round, stage, parameters, None, timeout=timeout)
             all_metrics = {**all_metrics, **metrics}
@@ -691,6 +692,7 @@ class FlowerServer(flwr.server.Server):
                 m = {**m6, **m7}
             metrics.append((len(cids), m))
         metrics_aggregated = self.strategy.evaluate_metrics_aggregation_fn(metrics)
+        metrics_aggregated = {'step': server_round, **metrics_aggregated}
 
         log(INFO, f'val_{server_round}: {metrics_aggregated}')
 
