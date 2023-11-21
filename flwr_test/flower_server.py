@@ -457,6 +457,9 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
         """Refine parameters on a single client."""
         metrics = {}
 
+        server_device = device
+        hnet = self.hnet.to(server_device)
+
         res = client.fit(ins=FitIns(self.parameters, {
             'cid': cid,
             'device': device,
@@ -469,9 +472,9 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
 
         embedding = torch.nn.Parameter(torch.tensor(
             parameters_to_ndarrays(res.parameters)[0],
-            device=self.server_device,
+            device=server_device,
         ))
-        tnet_state_dict = self.hnet(embedding)
+        tnet_state_dict = hnet(embedding)
         parameters = ndarrays_to_parameters([
             np.asarray(['tnet']),
             np.asarray(list(tnet_state_dict.keys())),
@@ -493,15 +496,15 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
         weight = res.num_examples
 
         loss = torch.stack([
-            ((o.detach() - torch.tensor(v, device=self.server_device)) * o).sum()
+            ((o.detach() - torch.tensor(v, device=server_device)) * o).sum()
             for o, v in zip(tnet_state_dict.values(), parameters_to_ndarrays(res.parameters)[2:])
         ])
         loss = loss.sum()
         metrics = {**metrics, 'loss_h': float(loss)}
 
-        grads = torch.autograd.grad(loss, [embedding] + list(self.hnet.parameters()))
+        grads = torch.autograd.grad(loss, [embedding] + list(hnet.parameters()))
         parameters = ndarrays_to_parameters([grads[0].detach().cpu().numpy()])
-        hnet_grad_dict = {k: v for k, v in zip(self.hnet.state_dict().keys(), grads[1:])}
+        hnet_grad_dict = {k: v.to(self.server_device) for k, v in zip(hnet.state_dict().keys(), grads[1:])}
 
         res = client.fit(FitIns(parameters, {
             'cid': cid,
