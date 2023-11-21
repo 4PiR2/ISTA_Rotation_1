@@ -1,5 +1,6 @@
 import argparse
 import concurrent.futures
+import copy
 import timeit
 from logging import DEBUG, INFO, WARNING
 import os
@@ -197,6 +198,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
                     )
                 case _:
                     raise NotImplementedError
+            self.hnets = [copy.deepcopy(self.hnet).to(f'cuda:{i}') for i in range(torch.cuda.device_count())]
         else:
             self.hnet: Optional[torch.nn.Module] = None
             self.optimizer_hnet: Optional[torch.optim.Optimizer] = None
@@ -458,7 +460,8 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
         metrics = {}
 
         server_device = device
-        hnet = self.hnet.to(server_device)
+        hnet = self.hnets[int(device.split(':')[-1])+1]
+        hnet.load_state_dict(self.hnet.state_dict(), strict=True)
 
         res = client.fit(ins=FitIns(self.parameters, {
             'cid': cid,
