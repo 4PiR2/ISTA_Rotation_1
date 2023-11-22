@@ -70,7 +70,7 @@ class CNNHyper(nn.Module):
 
 class CNNEmbed(nn.Module):
     def __init__(self, embed_y, dim_y, embed_dim, device=None, in_channels=3, n_kernels=16):
-        super(CNNEmbed, self).__init__()
+        super().__init__()
 
         in_channels += embed_y * dim_y
 

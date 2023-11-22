@@ -156,15 +156,27 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
         if model_embed_type != 'none':
             self.hnet_grads: Optional[queue.Queue] = queue.Queue()
 
-            if client_dataset_data_name == 'femnist':
-                client_dataset_num_clients = 3597
+            match client_dataset_data_name:
+                case 'cifar10':
+                    hnet_in_channels = 3
+                    hnet_out_dim = 10
+                case 'cifar100':
+                    hnet_in_channels = 3
+                    hnet_out_dim = 100
+                case 'femnist':
+                    client_dataset_num_clients = 3597
+                    hnet_in_channels = 1
+                    hnet_out_dim = 62
+                case _:
+                    raise NotImplementedError
+
             if model_embed_dim == -1:
                 model_embed_dim = 1 + client_dataset_num_clients // 4
             self.hnet: Optional[torch.nn.Module] = CNNHyper(
                 n_nodes=client_dataset_num_clients,
                 embedding_dim=model_embed_dim,
-                in_channels=3,
-                out_dim=10,
+                in_channels=hnet_in_channels,
+                out_dim=hnet_out_dim,
                 n_kernels=model_num_kernels,
                 hidden_dim=model_hyper_hid_dim,
                 spec_norm=False,
@@ -383,7 +395,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
                 torch.nn.utils.clip_grad_norm_(self.hnet.parameters(), 50.)
                 self.optimizer_hnet.step()
                 time_4s_end = timeit.default_timer()
-                time_metrics['time_server_4s2'] = time_4s_end -time_4s_start
+                time_metrics['time_server_4s2'] = time_4s_end - time_4s_start
 
             # Handled in the respective communication stack
             finished_fs, _ = concurrent.futures.wait(fs=submitted_fs, timeout=timeout)

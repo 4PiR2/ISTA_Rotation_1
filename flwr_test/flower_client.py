@@ -120,9 +120,9 @@ class FlowerClient(flwr.client.NumPyClient):
             case 3 | 6:
                 params, weight, metrics = self.fit_1(parameters, config)
             case 1 | 2 | 4 | 7:
-                params, weight, metrics =  self.fit_2(parameters, config)
+                params, weight, metrics = self.fit_2(parameters, config)
             case 5:
-                params, weight, metrics =  self.fit_3(parameters, config)
+                params, weight, metrics = self.fit_3(parameters, config)
             case _:
                 raise NotImplementedError
 
