@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader
 
 from PeFLL.dataset import gen_random_loaders
 from PeFLL.models import CNNTarget, CNNEmbed, MLPEmbed
-from PeFLL.utils import set_seed
+from PeFLL.utils import set_seed, count_parameters
 
 from parse_args import parse_args
 from utils import state_dicts_to_ndarrays, ndarrays_to_state_dicts
@@ -80,6 +80,7 @@ class FlowerClient(flwr.client.NumPyClient):
                 self.tnet = CNNTarget(in_channels=1, n_kernels=n_kernels, out_dim=62)
             case _:
                 raise ValueError("Choose data_name from ['cifar10', 'cifar100', 'femnist'].")
+        # log(INFO, f'num_parameters_tnet: {count_parameters(self.tnet)}')
 
         match data_name, embed_model:
             case 'cifar10', 'mlp':
@@ -96,6 +97,8 @@ class FlowerClient(flwr.client.NumPyClient):
                 self.enet = CNNEmbed(embed_y=embed_y, dim_y=62, embed_dim=embed_dim, device=device, in_channels=1, n_kernels=16)
             case _:
                 self.enet = None
+        # if self.enet is not None:
+        #     log(INFO, f'num_parameters_enet: {count_parameters(self.enet)}')
 
         return super().get_properties(config)
 

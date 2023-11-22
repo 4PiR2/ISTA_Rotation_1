@@ -35,7 +35,7 @@ import torch
 import wandb
 
 from PeFLL.models import CNNHyper
-from PeFLL.utils import set_seed
+from PeFLL.utils import set_seed, count_parameters
 
 from parse_args import parse_args
 from utils import aggregate_tensor, ndarrays_to_state_dicts, state_dicts_to_ndarrays, init_wandb, finish_wandb, \
@@ -187,6 +187,11 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
                 spec_norm=False,
                 n_hidden=model_hyper_hid_layers,
             ).to(device=self.server_device)
+            log(INFO, f'num_parameters_hnet: {count_parameters(self.hnet)}')
+
+            with torch.no_grad():
+                tnet_dummy = self.hnet(torch.zeros(model_embed_dim, device=self.server_device))
+            log(INFO, f'num_parameters_tnet: {sum([v.numel() for v in tnet_dummy.values()])}')
 
             match optimizer_hyper_type:
                 case 'adam':
@@ -308,12 +313,16 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
         else:
             log(INFO, "Using initial parameters provided by strategy")
 
+        state_dicts = ndarrays_to_state_dicts(parameters_to_ndarrays(parameters), self.server_device)
+        count = sum([v.numel() for sd in state_dicts.values() for v in sd.values()])
         if self.model_embed_type != 'none':
-            state_dicts = ndarrays_to_state_dicts(parameters_to_ndarrays(parameters), self.server_device)
             self.parameters_tensor = {
                 k: torch.nn.Parameter(v) for k, v in state_dicts[net_name].items()
             }
             self.optimizer_net.add_param_group({'params': self.parameters_tensor.values()})
+            log(INFO, f'num_parameters_enet: {count}')
+        else:
+            log(INFO, f'num_parameters_tnet: {count}')
 
         path = os.path.join(self.log_dir, self.experiment_name, 'checkpoints',
                             f'optimizer_{"enet"}_round_{self.init_round}.pth')
