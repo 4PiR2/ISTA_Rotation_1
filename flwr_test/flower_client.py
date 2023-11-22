@@ -11,7 +11,7 @@ from flwr.common.logger import log
 from grpc._channel import _MultiThreadedRendezvous
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, TensorDataset
 
 from PeFLL.dataset import gen_random_loaders
 from PeFLL.models import CNNTarget, CNNEmbed, MLPEmbed
@@ -102,6 +102,32 @@ class FlowerClient(flwr.client.NumPyClient):
 
         return super().get_properties(config)
 
+    def get_dataloader(self, is_eval: int, cid: int, device: torch.device = torch.device('cpu')) -> DataLoader:
+
+        def materialize_dataloader(dataloader: DataLoader, device: torch.device = torch.device('cpu')) -> DataLoader:
+            xs, ys = [], []
+            for x, y in dataloader.dataset:
+                xs.append(x.to(device))
+                ys.append(y.to(device))
+            xs = torch.stack(xs, dim=0)
+            ys = torch.stack(ys, dim=0)
+            dataset = TensorDataset(xs, ys)
+            dataloader_kwargs = {
+                k: v for k, v in vars(dataloader).items() if not k.startswith('_') and k not in ['batch_sampler']
+            }
+            dataloader_kwargs['dataset'] = dataset
+            return DataLoader(**dataloader_kwargs)
+
+        if 'dataloaders' not in self.stage_memory:
+            self.stage_memory['dataloaders'] = {}
+        if device not in self.stage_memory['dataloaders']:
+            self.stage_memory['dataloaders'][device] = [
+                [materialize_dataloader(dl) for dl in self.train_loaders],
+                [materialize_dataloader(dl) for dl in self.val_loaders],
+                [materialize_dataloader(dl) for dl in self.test_loaders],
+            ]
+        return self.stage_memory['dataloaders'][device][is_eval][cid]
+
     def get_parameters(self, config: Config) -> NDArrays:
         if config is not None and 'net_name' in config:
             header = [config['net_name']]
@@ -144,18 +170,18 @@ class FlowerClient(flwr.client.NumPyClient):
 
         if not is_eval:
             self.enet.train()
-            dataloader = self.train_loaders[cid]
+            dataloader = self.get_dataloader(0, cid, device)  # self.train_loaders[cid]
             num_batches = config['client_embed_num_batches']
         else:
             self.enet.eval()
             if config['client_eval_embed_train_split']:
-                dataloader = self.train_loaders[cid]
+                dataloader = self.get_dataloader(0, cid, device)  # self.train_loaders[cid]
             else:
                 match is_eval:
                     case 1:
-                        dataloader = self.val_loaders[cid]
+                        dataloader = self.get_dataloader(1, cid, device)  # self.val_loaders[cid]
                     case 2:
-                        dataloader = self.test_loaders[cid]
+                        dataloader = self.get_dataloader(2, cid, device)  # self.test_loaders[cid]
                     case _:
                         raise NotImplementedError
             num_batches = -1
@@ -203,15 +229,15 @@ class FlowerClient(flwr.client.NumPyClient):
                 momentum=config['client_optimizer_target_momentum'],
                 weight_decay=config['client_optimizer_target_weight_decay']
             )
-            dataloader = self.train_loaders[cid]
+            dataloader = self.get_dataloader(0, cid, device)  # self.train_loaders[cid]
             num_batches = config['client_target_num_batches']
         else:
             self.tnet.eval()
             match is_eval:
                 case 1:
-                    dataloader = self.val_loaders[cid]
+                    dataloader = self.get_dataloader(1, cid, device)  # self.val_loaders[cid]
                 case 2:
-                    dataloader = self.test_loaders[cid]
+                    dataloader = self.get_dataloader(2, cid, device)  # self.test_loaders[cid]
                 case _:
                     raise NotImplementedError
             num_batches = len(dataloader)
