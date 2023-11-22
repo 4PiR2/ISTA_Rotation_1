@@ -316,11 +316,11 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             self.optimizer_net.add_param_group({'params': self.parameters_tensor.values()})
 
         path = os.path.join(self.log_dir, self.experiment_name, 'checkpoints',
-                            f'model_{"enet"}_round_{self.init_round}.pth')
+                            f'optimizer_{"enet"}_round_{self.init_round}.pth')
         if self.init_round and self.optimizer_net is not None and os.path.exists(path):
             self.optimizer_net.load_state_dict(torch.load(path, map_location=self.server_device))
         path = os.path.join(self.log_dir, self.experiment_name, 'checkpoints',
-                            f'model_{"hnet"}_round_{self.init_round}.pth')
+                            f'optimizer_{"hnet"}_round_{self.init_round}.pth')
         if self.init_round and self.optimizer_hnet is not None and os.path.exists(path):
             self.optimizer_hnet.load_state_dict(torch.load(path, map_location=self.server_device))
 
