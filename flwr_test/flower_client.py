@@ -25,9 +25,9 @@ class FlowerClient(flwr.client.NumPyClient):
     def __init__(self):
         self.tnet: torch.nn.Module = torch.nn.Module()
         self.enet: Optional[torch.nn.Module] = None
-        self.trainloaders: List[DataLoader] = []
-        self.valloaders: List[DataLoader] = []
-        self.testloaders: List[DataLoader] = []
+        self.train_loaders: List[DataLoader] = []
+        self.val_loaders: List[DataLoader] = []
+        self.test_loaders: List[DataLoader] = []
         self.stage_memory: Dict = {}
 
     def get_properties(self, config: Config) -> Dict[str, Scalar]:
@@ -50,7 +50,7 @@ class FlowerClient(flwr.client.NumPyClient):
             alpha_test = alpha_train
 
         set_seed(seed)
-        self.trainloaders, self.valloaders, self.testloaders = gen_random_loaders(
+        self.train_loaders, self.val_loaders, self.test_loaders = gen_random_loaders(
             data_name=data_name,
             data_path=data_path,
             num_users=num_users,
@@ -141,18 +141,18 @@ class FlowerClient(flwr.client.NumPyClient):
 
         if not is_eval:
             self.enet.train()
-            dataloader = self.trainloaders[cid]
+            dataloader = self.train_loaders[cid]
             num_batches = config['client_embed_num_batches']
         else:
             self.enet.eval()
             if config['client_eval_embed_train_split']:
-                dataloader = self.trainloaders[cid]
+                dataloader = self.train_loaders[cid]
             else:
                 match is_eval:
                     case 1:
-                        dataloader = self.valloaders[cid]
+                        dataloader = self.val_loaders[cid]
                     case 2:
-                        dataloader = self.testloaders[cid]
+                        dataloader = self.test_loaders[cid]
                     case _:
                         raise NotImplementedError
             num_batches = -1
@@ -200,15 +200,15 @@ class FlowerClient(flwr.client.NumPyClient):
                 momentum=config['client_optimizer_target_momentum'],
                 weight_decay=config['client_optimizer_target_weight_decay']
             )
-            dataloader = self.trainloaders[cid]
+            dataloader = self.train_loaders[cid]
             num_batches = config['client_target_num_batches']
         else:
             self.tnet.eval()
             match is_eval:
                 case 1:
-                    dataloader = self.valloaders[cid]
+                    dataloader = self.val_loaders[cid]
                 case 2:
-                    dataloader = self.testloaders[cid]
+                    dataloader = self.test_loaders[cid]
                 case _:
                     raise NotImplementedError
             num_batches = len(dataloader)
@@ -266,9 +266,9 @@ class FlowerClient(flwr.client.NumPyClient):
             p.grad = None
         loss.backward()
         torch.nn.utils.clip_grad_norm_(list(self.enet.parameters()), 50.)
-        p_grads = ([np.asarray(['enet']), np.asarray(list(self.enet.state_dict().keys()))]
-                   + [p.grad.detach().cpu().numpy() for p in self.enet.parameters()])
-        return p_grads, 1, {
+        grad_dict = {k: v.grad for k, v in zip(self.enet.state_dict().keys(), self.enet.parameters())}
+        grads = state_dicts_to_ndarrays({'enet': grad_dict})
+        return grads, 1, {
             'loss_e': float(loss),
         }
 

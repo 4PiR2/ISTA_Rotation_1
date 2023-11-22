@@ -20,6 +20,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--eval-test', type=str2bool, default=False, help='eval on test dataset')
     parser.add_argument('--log-dir', type=str, default='./outputs', help='dir path for output file')
     parser.add_argument('--experiment-name', type=Optional[str], default=None, help='experiment name')
+    parser.add_argument('--server-seed', type=int, default=42, help="seed value")
 
     #############################
     #       Dataset Args        #

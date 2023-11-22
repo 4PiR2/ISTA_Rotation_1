@@ -35,6 +35,7 @@ import torch
 import wandb
 
 from PeFLL.models import CNNHyper
+from PeFLL.utils import set_seed
 
 from parse_args import parse_args
 from utils import aggregate_tensor, ndarrays_to_state_dicts, state_dicts_to_ndarrays, init_wandb, finish_wandb, \
@@ -51,6 +52,8 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             eval_interval: int = 10,
             eval_test: bool = False,
             log_dir: str = './outputs',
+            experiment_name: Optional[str] = None,
+            server_seed: int = 42,
             client_dataset_seed: int = 42,
             client_dataset_data_name: str = 'cifar10',
             client_dataset_data_path: str = './dataset',
@@ -79,6 +82,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             client_eval_mask_absent: bool = False,
             client_eval_embed_train_split: bool = True,
     ):
+        set_seed(server_seed)
         flwr.server.Server.__init__(self, client_manager=SimpleClientManager(), strategy=self)
 
         def weighted_average(metrics: List[Tuple[int, Metrics]]) -> Metrics:
@@ -124,6 +128,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
         self.eval_interval: int = eval_interval
         self.eval_test: bool = eval_test
         self.log_dir: str = log_dir
+        self.experiment_name: str = experiment_name if experiment_name is not None else ''
         self.client_dataset_seed: int = client_dataset_seed
         self.client_dataset_data_name: str = client_dataset_data_name
         self.client_dataset_data_path: str = client_dataset_data_path
@@ -237,8 +242,8 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
         log(INFO, "FL starting")
         start_time = timeit.default_timer()
 
-        if self.eval_interval > 0:
-            self.evaluate_round(0, timeout)
+        if self.eval_interval > 0 and self.init_round <= num_rounds:
+            self.evaluate_round(self.init_round, timeout)
         for server_round in range(1 + self.init_round, 1 + num_rounds):
             self.fit_round(server_round, timeout)
             if self.eval_interval <= 0 or server_round % self.eval_interval:
@@ -281,17 +286,15 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
         parameters = super().initialize_parameters(client_manager)
         net_name = 'tnet' if self.model_embed_type == 'none' else 'enet'
         if parameters is None and self.init_round:
-            state_dicts = {net_name: torch.load(
-                    os.path.join(self.log_dir, 'checkpoints', f'model_{net_name}_round_{self.init_round}.pth'),
-                    map_location=self.server_device,
-            )}
+            state_dicts = {net_name: torch.load(os.path.join(
+                self.log_dir, self.experiment_name, 'checkpoints', f'model_{net_name}_round_{self.init_round}.pth'
+            ), map_location=self.server_device)}
             # state_dicts = {net_name: get_pefll_checkpoint()[f'{net_name}_state_dict']}
             parameters = ndarrays_to_parameters(state_dicts_to_ndarrays(state_dicts))
             if self.hnet is not None:
-                state_dict = torch.load(
-                    os.path.join(self.log_dir, 'checkpoints', f'model_{"hnet"}_round_{self.init_round}.pth'),
-                    map_location=self.server_device,
-                )
+                state_dict = torch.load(os.path.join(
+                    self.log_dir, self.experiment_name, 'checkpoints', f'model_{"hnet"}_round_{self.init_round}.pth'
+                ), map_location=self.server_device)
                 # state_dict = get_pefll_checkpoint()['hnet_state_dict']
                 self.hnet.load_state_dict(state_dict, strict=True)
         if parameters is None:
@@ -312,6 +315,15 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             }
             self.optimizer_net.add_param_group({'params': self.parameters_tensor.values()})
 
+        path = os.path.join(self.log_dir, self.experiment_name, 'checkpoints',
+                            f'model_{"enet"}_round_{self.init_round}.pth')
+        if self.init_round and self.optimizer_net is not None and os.path.exists(path):
+            self.optimizer_net.load_state_dict(torch.load(path, map_location=self.server_device))
+        path = os.path.join(self.log_dir, self.experiment_name, 'checkpoints',
+                            f'model_{"hnet"}_round_{self.init_round}.pth')
+        if self.init_round and self.optimizer_hnet is not None and os.path.exists(path):
+            self.optimizer_hnet.load_state_dict(torch.load(path, map_location=self.server_device))
+
         return parameters
 
     def save_model(self, parameters: Parameters, server_round: int):
@@ -328,6 +340,16 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             torch.save(
                 self.hnet.state_dict(),
                 os.path.join(self.log_dir, 'checkpoints', f'model_{"hnet"}_round_{server_round}.pth'),
+            )
+        if self.optimizer_net is not None:
+            torch.save(
+                self.optimizer_net.state_dict(),
+                os.path.join(self.log_dir, 'checkpoints', f'optimizer_{"enet"}_round_{server_round}.pth'),
+            )
+        if self.optimizer_hnet is not None:
+            torch.save(
+                self.optimizer_hnet.state_dict(),
+                os.path.join(self.log_dir, 'checkpoints', f'optimizer_{"hnet"}_round_{server_round}.pth'),
             )
 
     def sample_clients(
@@ -691,6 +713,8 @@ def make_server(args: argparse.Namespace):
         eval_interval=args.eval_interval,
         eval_test=args.eval_test,
         log_dir=args.log_dir,
+        experiment_name=args.experiment_name,
+        server_seed=args.server_seed,
         client_dataset_seed=args.client_dataset_seed,
         client_dataset_data_name=args.client_dataset_data_name,
         client_dataset_data_path=args.client_dataset_data_path,
