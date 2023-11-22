@@ -1,6 +1,7 @@
 import gc
 from logging import DEBUG, INFO
 import time
+import timeit
 import traceback
 from typing import Dict, List, Optional, Tuple
 
@@ -112,15 +113,22 @@ class FlowerClient(flwr.client.NumPyClient):
 
     def fit(self, parameters: List[np.ndarray], config: Config) -> Tuple[NDArrays, int, Dict[str, Scalar]]:
         """Train the network on the training set."""
-        match config['stage']:
+        start_time = timeit.default_timer()
+
+        stage = config['stage']
+        match stage:
             case 3 | 6:
-                return self.fit_1(parameters, config)
+                params, weight, metrics = self.fit_1(parameters, config)
             case 1 | 2 | 4 | 7:
-                return self.fit_2(parameters, config)
+                params, weight, metrics =  self.fit_2(parameters, config)
             case 5:
-                return self.fit_3(parameters, config)
+                params, weight, metrics =  self.fit_3(parameters, config)
             case _:
                 raise NotImplementedError
+
+        end_time = timeit.default_timer()
+        metrics[f'time_client_{stage}c'] = end_time - start_time
+        return params, weight, metrics
 
     def fit_1(self, parameters: List[np.ndarray], config: Config) -> Tuple[NDArrays, int, Dict[str, Scalar]]:
         device = torch.device(config['device'])
@@ -261,7 +269,7 @@ class FlowerClient(flwr.client.NumPyClient):
         p_grads = ([np.asarray(['enet']), np.asarray(list(self.enet.state_dict().keys()))]
                    + [p.grad.detach().cpu().numpy() for p in self.enet.parameters()])
         return p_grads, 1, {
-            'loss_e': float(loss)
+            'loss_e': float(loss),
         }
 
     def evaluate(self, parameters: List[np.ndarray], config: Config) -> Tuple[float, int, Dict[str, Scalar]]:

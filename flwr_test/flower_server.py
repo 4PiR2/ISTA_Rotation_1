@@ -225,7 +225,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
         log(INFO, "FL starting")
         start_time = timeit.default_timer()
 
-        # self.evaluate_round(0, timeout)
+        self.evaluate_round(0, timeout)
         for server_round in range(1 + self.init_round, 1 + num_rounds):
             self.fit_round(server_round, timeout)
             if server_round % self.eval_interval:
@@ -357,6 +357,9 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
 
     def fit_round(self, server_round: int, timeout: Optional[float] = None) -> Optional[Dict[str, Scalar]]:
         """Perform a single round of federated averaging."""
+        start_time = timeit.default_timer()
+        time_metrics = {}
+
         if self.model_embed_type != 'none':
             self.hnet.train()
             client_fn = self.fit_client_pefll
@@ -370,17 +373,21 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             }
 
             if self.model_embed_type != 'none':
-                hnet_grad = aggregate_tensor([
-                    self.hnet_grads.get(block=True, timeout=timeout) for _ in range(len(submitted_fs))
-                ])
+                hnet_grads = [self.hnet_grads.get(block=True, timeout=timeout) for _ in range(len(submitted_fs))]
+                time_4s_start = timeit.default_timer()
+                hnet_grad = aggregate_tensor(hnet_grads)
                 self.optimizer_hnet.zero_grad()
                 for p, g in zip(self.hnet.parameters(), hnet_grad):
                     p.grad = g
                 torch.nn.utils.clip_grad_norm_(self.hnet.parameters(), 50.)
                 self.optimizer_hnet.step()
+                time_4s_end = timeit.default_timer()
+                time_metrics['time_server_4s2'] = time_4s_end -time_4s_start
 
             # Handled in the respective communication stack
             finished_fs, _ = concurrent.futures.wait(fs=submitted_fs, timeout=timeout)
+
+        time_5s_start = timeit.default_timer()
 
         weights, metrics, state_dicts = [], [], []
         for future in finished_fs:
@@ -413,14 +420,18 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
         else:
             self.parameters = ndarrays_to_parameters(state_dicts_to_ndarrays({'tnet': state_dict}))
 
+        end_time = timeit.default_timer()
+        time_metrics['time_server_5s2'] = end_time - time_5s_start
+        time_metrics['time_server_step'] = end_time - start_time
+
         # Aggregate custom metrics if aggregation fn was provided
-        metrics_aggregated = {'step': server_round}
-        if self.fit_metrics_aggregation_fn:
-            metrics_aggregated = {**metrics_aggregated, **self.fit_metrics_aggregation_fn(
-                [(w, mc) for w, mc in zip(weights, metrics)]
-            )}
-        elif server_round == 1:  # Only log this warning once
-            log(WARNING, "No fit_metrics_aggregation_fn provided")
+        metrics_aggregated = {'step': server_round, **time_metrics}
+        # if self.fit_metrics_aggregation_fn:
+        metrics_aggregated = {**metrics_aggregated, **self.fit_metrics_aggregation_fn(
+            [(w, mc) for w, mc in zip(weights, metrics)]
+        )}
+        # elif server_round == 1:  # Only log this warning once
+        #     log(WARNING, "No fit_metrics_aggregation_fn provided")
         log(INFO, f'fit_round_{server_round}: {metrics_aggregated}')
         if wandb.run is not None:
             wandb.log({'fit': metrics_aggregated}, commit=False, step=server_round)
@@ -433,8 +444,8 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             device: str,
     ):
         """Refine parameters on a single client."""
+        time_start = timeit.default_timer()
         metrics = {}
-
         res = client.fit(ins=FitIns(self.parameters, {
             'cid': cid,
             'device': device,
@@ -442,6 +453,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             'is_eval': False,
             'client_embed_num_batches': self.client_embed_num_batches,
         }), timeout=None)
+        time_3s_start = timeit.default_timer()
         assert res.status.code == Code.OK
         metrics = {**metrics, **res.metrics}
 
@@ -452,6 +464,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
         tnet_state_dict = self.hnet(embedding)
         parameters = ndarrays_to_parameters(state_dicts_to_ndarrays({'tnet': tnet_state_dict}))
 
+        time_3s_end = timeit.default_timer()
         res = client.fit(FitIns(parameters, {
             'cid': cid,
             'device': device,
@@ -462,6 +475,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             'client_optimizer_target_weight_decay': self.client_optimizer_target_weight_decay,
             'client_target_num_batches': self.client_target_num_batches,
         }), timeout=None)
+        time_4s_start = timeit.default_timer()
         assert res.status.code == Code.OK
         metrics = {**metrics, **res.metrics}
         weight = res.num_examples
@@ -478,17 +492,30 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
         self.hnet_grads.put((grads[1:], weight), block=True, timeout=None)
         parameters = ndarrays_to_parameters([grads[0].detach().cpu().numpy()])
 
+        time_4s_end = timeit.default_timer()
         res = client.fit(FitIns(parameters, {
             'cid': cid,
             'device': device,
             'stage': 5,
             'is_eval': False,
         }), timeout=None)
+        time_5s_start = timeit.default_timer()
         assert res.status.code == Code.OK
         metrics = {**metrics, **res.metrics}
 
         # Convert results
         enet_grad_dict = ndarrays_to_state_dicts(parameters_to_ndarrays(res.parameters), self.server_device)['enet']
+
+        time_5s_end = timeit.default_timer()
+        time_metrics = {
+            'time_server_3s': time_3s_end - time_3s_start,
+            'time_server_4s1': time_4s_end - time_4s_start,
+            'time_server_5s1': time_5s_end - time_5s_start,
+            'time_server_3c': time_3s_start - time_start,
+            'time_server_4c': time_4s_start - time_3s_end,
+            'time_server_5c': time_5s_start - time_4s_end,
+        }
+        metrics = {**metrics, **time_metrics}
         return weight, metrics, enet_grad_dict
 
     def fit_client_fedavg(
@@ -498,6 +525,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             device: str,
     ):
         """Refine parameters on a single client."""
+        time_start = timeit.default_timer()
         res = client.fit(ins=FitIns(self.parameters, {
             'cid': cid,
             'device': device,
@@ -508,12 +536,21 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             'client_optimizer_target_weight_decay': self.client_optimizer_target_weight_decay,
             'client_target_num_batches': self.client_target_num_batches,
         }), timeout=None)
+        time_1s_start = timeit.default_timer()
         assert res.status.code == Code.OK
         state_dict = ndarrays_to_state_dicts(parameters_to_ndarrays(res.parameters), self.server_device)['tnet']
-        return res.num_examples, res.metrics, state_dict
+        time_1s_end = timeit.default_timer()
+        time_metrics = {
+            'time_server_1s1': time_1s_end - time_1s_start,
+            'time_server_1c': time_1s_start - time_start,
+        }
+        metrics = {**res.metrics, **time_metrics}
+        return res.num_examples, metrics, state_dict
 
     def evaluate_round(self, server_round: int, timeout: Optional[float] = None) -> Optional[Dict[str, Scalar]]:
         """Validate current global model on a number of clients."""
+        start_time = timeit.default_timer()
+
         if self.model_embed_type != 'none':
             self.hnet.eval()
             client_fn = self.evaluate_client_pefll
@@ -542,7 +579,9 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
                 weights.append(w)
                 metrics.append(m)
 
-        metrics_aggregated = {'step': server_round}
+        end_time = timeit.default_timer()
+
+        metrics_aggregated = {'step': server_round, 'time_server_step': end_time - start_time}
         metrics_aggregated = {**metrics_aggregated, **self.evaluate_metrics_aggregation_fn(
             [(w, m) for w, m in zip(weights, metrics)]
         )}
