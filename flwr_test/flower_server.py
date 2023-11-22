@@ -225,10 +225,11 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
         log(INFO, "FL starting")
         start_time = timeit.default_timer()
 
-        self.evaluate_round(0, timeout)
+        if self.eval_interval > 0:
+            self.evaluate_round(0, timeout)
         for server_round in range(1 + self.init_round, 1 + num_rounds):
             self.fit_round(server_round, timeout)
-            if server_round % self.eval_interval:
+            if self.eval_interval <= 0 or server_round % self.eval_interval:
                 continue
             self.save_model(self.parameters, server_round)  # save model checkpoint
             self.evaluate_round(server_round, timeout)
@@ -508,12 +509,12 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
 
         time_5s_end = timeit.default_timer()
         time_metrics = {
-            'time_server_3s': time_3s_end - time_3s_start,
-            'time_server_4s1': time_4s_end - time_4s_start,
-            'time_server_5s1': time_5s_end - time_5s_start,
             'time_server_3c': time_3s_start - time_start,
+            'time_server_3s': time_3s_end - time_3s_start,
             'time_server_4c': time_4s_start - time_3s_end,
+            'time_server_4s1': time_4s_end - time_4s_start,
             'time_server_5c': time_5s_start - time_4s_end,
+            'time_server_5s1': time_5s_end - time_5s_start,
         }
         metrics = {**metrics, **time_metrics}
         return weight, metrics, enet_grad_dict
@@ -538,14 +539,16 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
         }), timeout=None)
         time_1s_start = timeit.default_timer()
         assert res.status.code == Code.OK
+        metrics = res.metrics
+        weight = res.num_examples
         state_dict = ndarrays_to_state_dicts(parameters_to_ndarrays(res.parameters), self.server_device)['tnet']
         time_1s_end = timeit.default_timer()
         time_metrics = {
-            'time_server_1s1': time_1s_end - time_1s_start,
             'time_server_1c': time_1s_start - time_start,
+            'time_server_1s1': time_1s_end - time_1s_start,
         }
-        metrics = {**res.metrics, **time_metrics}
-        return res.num_examples, metrics, state_dict
+        metrics = {**metrics, **time_metrics}
+        return weight, metrics, state_dict
 
     def evaluate_round(self, server_round: int, timeout: Optional[float] = None) -> Optional[Dict[str, Scalar]]:
         """Validate current global model on a number of clients."""
@@ -597,6 +600,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             device: str,
     ):
         """Refine parameters on a single client."""
+        time_start = timeit.default_timer()
         metrics = {}
         res = client.fit(ins=FitIns(self.parameters, {
             'cid': cid,
@@ -605,6 +609,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             'is_eval': True,
             'client_eval_embed_train_split': self.client_eval_embed_train_split,
         }), timeout=None)
+        time_6s_start = timeit.default_timer()
         assert res.status.code == Code.OK
         metrics = {**metrics, **res.metrics}
 
@@ -616,6 +621,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             tnet_state_dict = self.hnet(embedding)
         parameters = ndarrays_to_parameters(state_dicts_to_ndarrays({'tnet': tnet_state_dict}))
 
+        time_6s_end = timeit.default_timer()
         res = client.fit(FitIns(parameters, {
             'cid': cid,
             'device': device,
@@ -623,10 +629,18 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             'is_eval': True,
             'client_eval_mask_absent': self.client_eval_mask_absent,
         }), timeout=None)
+        time_7s_start = timeit.default_timer()
         assert res.status.code == Code.OK
         metrics = {**metrics, **res.metrics}
         weight = res.num_examples
-
+        time_7s_end = timeit.default_timer()
+        time_metrics = {
+            'time_server_6c': time_6s_start - time_start,
+            'time_server_6s': time_6s_end - time_6s_start,
+            'time_server_7c': time_7s_start - time_6s_end,
+            # 'time_server_7s1': time_7s_end - time_7s_start,
+        }
+        metrics = {**metrics, **time_metrics}
         return weight, metrics
 
     def evaluate_client_fedavg(
@@ -636,14 +650,24 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             device: str,
     ):
         """Refine parameters on a single client."""
+        time_start = timeit.default_timer()
         res = client.fit(FitIns(self.parameters, {
             'cid': cid,
             'device': device,
             'stage': 2,
             'is_eval': True,
         }), timeout=None)
+        time_2s_start = timeit.default_timer()
         assert res.status.code == Code.OK
-        return res.num_examples, res.metrics
+        metrics = res.metrics
+        weight = res.num_examples
+        time_2s_end = timeit.default_timer()
+        time_metrics = {
+            'time_server_2c': time_2s_start - time_start,
+            # 'time_server_2s1': time_2s_end - time_2s_start,
+        }
+        metrics = {**metrics, **time_metrics}
+        return weight, metrics
 
 
 def make_server(args: argparse.Namespace):

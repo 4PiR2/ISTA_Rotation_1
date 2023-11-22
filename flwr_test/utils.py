@@ -48,8 +48,10 @@ def state_dicts_to_ndarrays(state_dicts: Dict[str, Dict[str, torch.Tensor]]) -> 
     return ndarrays
 
 
-def ndarrays_to_state_dicts(ndarrays: List[np.ndarray], device: torch.device = torch.device('cpu')) \
-        -> Dict[str, Dict[str, torch.Tensor]]:
+def ndarrays_to_state_dicts(
+        ndarrays: List[np.ndarray],
+        device: torch.device = torch.device('cpu'),
+) -> Dict[str, Dict[str, torch.Tensor]]:
     state_dicts: Dict[str, Dict[str, torch.Tensor]] = {}
     for i, net_name in enumerate(ndarrays[0]):
         keys = ndarrays[1 + i]
