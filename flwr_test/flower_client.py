@@ -101,6 +101,7 @@ class FlowerClient(flwr.client.NumPyClient):
         # if self.enet is not None:
         #     log(INFO, f'num_parameters_enet: {count_parameters(self.enet)}')
 
+        self.get_dataloader(0, 0, torch.device('cpu'))  # prefetch datasets to RAM
         return super().get_properties(config)
 
     def get_dataloader(self, is_eval: int, cid: int, device: torch.device = torch.device('cpu')) -> DataLoader:

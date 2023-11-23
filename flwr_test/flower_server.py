@@ -1,9 +1,9 @@
 import argparse
 import concurrent.futures
-import queue
-import timeit
 from logging import DEBUG, INFO, WARNING
 import os
+import queue
+import timeit
 from typing import Dict, List, Optional, Tuple, Union
 
 import flwr
