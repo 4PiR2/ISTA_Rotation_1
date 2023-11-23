@@ -118,8 +118,6 @@ class FlowerClient(flwr.client.NumPyClient):
             if torch.device(device).type != 'cpu':
                 del dataloader_kwargs['pin_memory']
             dataloader_kwargs['dataset'] = dataset
-            dataloader_kwargs['num_workers'] = 2
-            dataloader_kwargs['persistent_workers'] = True
             return DataLoader(**dataloader_kwargs)
 
         if 'dataloaders' not in self.stage_memory:
@@ -165,6 +163,7 @@ class FlowerClient(flwr.client.NumPyClient):
 
     def fit_1(self, parameters: List[np.ndarray], config: Config) -> Tuple[NDArrays, int, Dict[str, Scalar]]:
         device = torch.device(config['device'])
+        dataset_device = torch.device('cpu')
         self.enet = self.enet.to(device)
         self.enet.device = device  # bug in PeFLL
         self.set_parameters(parameters)
@@ -174,15 +173,15 @@ class FlowerClient(flwr.client.NumPyClient):
 
         if not is_eval:
             self.enet.train()
-            dataloader = self.get_dataloader(is_eval, cid, device)  # self.train_loaders[cid]
+            dataloader = self.get_dataloader(is_eval, cid, dataset_device)  # self.train_loaders[cid]
             num_batches = config['client_embed_num_batches']
         else:
             self.enet.eval()
             if config['client_eval_embed_train_split']:
-                dataloader = self.get_dataloader(0, cid, device)  # self.train_loaders[cid]
+                dataloader = self.get_dataloader(0, cid, dataset_device)  # self.train_loaders[cid]
             else:
                 # self.val_loaders[cid] or self.test_loaders[cid]
-                dataloader = self.get_dataloader(is_eval, cid, device)
+                dataloader = self.get_dataloader(is_eval, cid, dataset_device)
             num_batches = -1
 
         num_batches = num_batches if num_batches != -1 else len(dataloader)
@@ -213,13 +212,14 @@ class FlowerClient(flwr.client.NumPyClient):
 
     def fit_2(self, parameters: List[np.ndarray], config: Config) -> Tuple[NDArrays, int, Dict[str, Scalar]]:
         device = torch.device(config['device'])
+        dataset_device = torch.device('cpu')
         self.tnet = self.tnet.to(device)
         self.set_parameters(parameters)
 
         cid = int(config['cid'])
         is_eval = config['is_eval']
         criterion = torch.nn.CrossEntropyLoss()
-        dataloader = self.get_dataloader(is_eval, cid, device)
+        dataloader = self.get_dataloader(is_eval, cid, dataset_device)
 
         if not is_eval:
             self.tnet.train()
@@ -246,7 +246,7 @@ class FlowerClient(flwr.client.NumPyClient):
                     break
                 i += 1
                 length += len(labels)
-                # images, labels = images.to(device), labels.to(device)
+                images, labels = images.to(device), labels.to(device)
                 if not is_eval:
                     outputs = self.tnet(images)
                 else:
