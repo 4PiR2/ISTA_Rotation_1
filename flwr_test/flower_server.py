@@ -759,7 +759,7 @@ def make_server(args: argparse.Namespace):
 
 def main():
     args = parse_args()
-    init_wandb(args, args.experiment_name)
+    init_wandb(args, args.experiment_name, group=os.environ['SLURM_JOB_UID'] if args.enable_slurm and detect_slurm() else None)
     server = make_server(args)
     flwr.server.start_server(
         server_address=f"0.0.0.0:{args.server_address.split(':')[-1]}",

@@ -91,7 +91,7 @@ def run(cmd: List[str], cwd: Optional[str] = None, env=None, shell=False, blocki
 
 
 def detect_slurm():
-    return 'SLURMD_NODENAME' in os.environ and 'SLURM_SUBMIT_HOST' in os.environ
+    return 'SLURMD_NODENAME' in os.environ
 
 
 def parse_node_list(string: str) -> List[str]:
@@ -136,8 +136,8 @@ def parse_node_list(string: str) -> List[str]:
     return nodes
 
 
-def init_wandb(args: argparse.Namespace, experiment_name: Optional[str] = None):
     # return False
+def init_wandb(args: argparse.Namespace, experiment_name: Optional[str] = None, group: Optional[str] = None):
     try:
         with open('wandb_token.txt', 'r') as f:
             wandb_token = f.readline().strip()
@@ -149,6 +149,7 @@ def init_wandb(args: argparse.Namespace, experiment_name: Optional[str] = None):
             dir=args.log_dir,
             # Set the project where this run will be logged
             project='test',
+            group=group,
             # We pass a run name (otherwise it’ll be randomly assigned, like sunshine-lollypop-10)
             name=experiment_name,
             # Track hyperparameters and run metadata

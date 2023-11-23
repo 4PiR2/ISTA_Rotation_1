@@ -35,4 +35,4 @@
 unset SLURM_EXPORT_ENV
 
 #run the binary through SLURM's srun
-srun --cpu_bind=verbose bash -c "python3 launcher.py --num-step-clients 5 --num-rounds 1000 >> outputs/slurm/out_\$(hostname).txt"
+srun --cpu_bind=verbose bash -c "python3 launcher.py --num-step-clients 5 --num-rounds 1000 --eval-interval 0 >> outputs/slurm/out_\$(hostname).txt"
