@@ -19,7 +19,7 @@ from PeFLL.models import CNNTarget, CNNEmbed, MLPEmbed
 from PeFLL.utils import set_seed, count_parameters
 
 from parse_args import parse_args
-from utils import state_dicts_to_ndarrays, ndarrays_to_state_dicts
+from utils import state_dicts_to_ndarrays, ndarrays_to_state_dicts, detect_slurm
 
 
 class FlowerClient(flwr.client.NumPyClient):
@@ -303,7 +303,7 @@ def main():
     args = parse_args()
 
     ip, port = args.server_address.split(':')
-    if args.enable_slurm and 'SLURM_SUBMIT_HOST' in os.environ:
+    if args.enable_slurm and detect_slurm():
         ip = os.environ['SLURM_SUBMIT_HOST']
 
     while True:

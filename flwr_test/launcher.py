@@ -8,13 +8,13 @@ import torch
 from flower_client import FlowerClient, main as main_c
 from flower_server import make_server, main as main_s
 from parse_args import parse_args
-from utils import run, init_wandb, finish_wandb
+from utils import run, init_wandb, finish_wandb, detect_slurm
 
 
 def main():
     args = parse_args()
 
-    if args.enable_slurm and 'SLURM_SUBMIT_HOST' in os.environ:
+    if args.enable_slurm and detect_slurm():
         servername = os.environ['SLURM_SUBMIT_HOST']
         hostname = os.environ['SLURMD_NODENAME']
         if hostname == servername:

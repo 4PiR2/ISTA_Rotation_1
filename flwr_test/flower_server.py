@@ -39,12 +39,13 @@ from PeFLL.utils import set_seed, count_parameters
 
 from parse_args import parse_args
 from utils import aggregate_tensor, ndarrays_to_state_dicts, state_dicts_to_ndarrays, init_wandb, finish_wandb, \
-    get_pefll_checkpoint
+    get_pefll_checkpoint, detect_slurm
 
 
 class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
     def __init__(
             self,
+            enable_slurm: bool,
             mode: str,
             num_train_clients: int,
             num_step_clients: int,
@@ -96,6 +97,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             avg_metrics = weights @ metrics_mat
             return {k: float(v) for k, v in zip(keys, avg_metrics)}
 
+        self.enable_slurm: bool = enable_slurm
         self.mode: str = mode
         self.num_train_clients: int = num_train_clients
 
@@ -390,7 +392,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
 
         num_gpus = torch.cuda.device_count()
         if num_gpus > 0:
-            if self.mode == 'simulated':
+            if self.mode == 'simulated' or self.enable_slurm:
                 devices = ['cuda'] * len(clients)
             else:
                 devices = [f'cuda:{all_cids.index(client.cid) % num_gpus}' for client in clients]
@@ -715,6 +717,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
 
 def make_server(args: argparse.Namespace):
     return FlowerServer(
+        enable_slurm=args.enable_slurm and detect_slurm(),
         mode=args.mode,
         num_train_clients=args.num_train_clients,
         num_step_clients=args.num_step_clients,
