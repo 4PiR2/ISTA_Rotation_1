@@ -170,20 +170,15 @@ class FlowerClient(flwr.client.NumPyClient):
 
         if not is_eval:
             self.enet.train()
-            dataloader = self.get_dataloader(0, cid, device)  # self.train_loaders[cid]
+            dataloader = self.get_dataloader(is_eval, cid, device)  # self.train_loaders[cid]
             num_batches = config['client_embed_num_batches']
         else:
             self.enet.eval()
             if config['client_eval_embed_train_split']:
                 dataloader = self.get_dataloader(0, cid, device)  # self.train_loaders[cid]
             else:
-                match is_eval:
-                    case 1:
-                        dataloader = self.get_dataloader(1, cid, device)  # self.val_loaders[cid]
-                    case 2:
-                        dataloader = self.get_dataloader(2, cid, device)  # self.test_loaders[cid]
-                    case _:
-                        raise NotImplementedError
+                # self.val_loaders[cid] or self.test_loaders[cid]
+                dataloader = self.get_dataloader(is_eval, cid, device)
             num_batches = -1
 
         num_batches = num_batches if num_batches != -1 else len(dataloader)
@@ -220,6 +215,7 @@ class FlowerClient(flwr.client.NumPyClient):
         cid = int(config['cid'])
         is_eval = config['is_eval']
         criterion = torch.nn.CrossEntropyLoss()
+        dataloader = self.get_dataloader(is_eval, cid, device)
 
         if not is_eval:
             self.tnet.train()
@@ -229,17 +225,9 @@ class FlowerClient(flwr.client.NumPyClient):
                 momentum=config['client_optimizer_target_momentum'],
                 weight_decay=config['client_optimizer_target_weight_decay']
             )
-            dataloader = self.get_dataloader(0, cid, device)  # self.train_loaders[cid]
             num_batches = config['client_target_num_batches']
         else:
             self.tnet.eval()
-            match is_eval:
-                case 1:
-                    dataloader = self.get_dataloader(1, cid, device)  # self.val_loaders[cid]
-                case 2:
-                    dataloader = self.get_dataloader(2, cid, device)  # self.test_loaders[cid]
-                case _:
-                    raise NotImplementedError
             num_batches = len(dataloader)
 
         if is_eval and 'client_eval_mask_absent' in config and config['client_eval_mask_absent']:
@@ -254,7 +242,7 @@ class FlowerClient(flwr.client.NumPyClient):
                     break
                 i += 1
                 length += len(labels)
-                images, labels = images.to(device), labels.to(device)
+                # images, labels = images.to(device), labels.to(device)
                 if not is_eval:
                     outputs = self.tnet(images)
                 else:
