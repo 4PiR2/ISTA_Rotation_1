@@ -115,7 +115,11 @@ class FlowerClient(flwr.client.NumPyClient):
             dataloader_kwargs = {
                 k: v for k, v in vars(dataloader).items() if not k.startswith('_') and k not in ['batch_sampler']
             }
+            if torch.device(device).type != 'cpu':
+                del dataloader_kwargs['pin_memory']
             dataloader_kwargs['dataset'] = dataset
+            dataloader_kwargs['num_workers'] = 2
+            dataloader_kwargs['persistent_workers'] = True
             return DataLoader(**dataloader_kwargs)
 
         if 'dataloaders' not in self.stage_memory:
