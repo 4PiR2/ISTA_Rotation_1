@@ -10,6 +10,7 @@ def parse_args() -> argparse.Namespace:
     #############################
     #       General args        #
     #############################
+    parser.add_argument('--enable-slurm', type=str2bool, default=True)
     parser.add_argument('--mode', type=str, default='multiplex')
     parser.add_argument('--server-address', type=str, default=f'127.0.0.1:{18080}')
     parser.add_argument('--num-train-clients', type=int, default=int(100 * .9), help='number of nodes used in training')  # femnist: recommend int(3597 * .9)

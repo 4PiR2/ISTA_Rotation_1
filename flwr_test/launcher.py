@@ -5,14 +5,26 @@ import time
 import flwr
 import torch
 
-from flower_client import FlowerClient
-from flower_server import make_server
+from flower_client import FlowerClient, main as main_c
+from flower_server import make_server, main as main_s
 from parse_args import parse_args
 from utils import run, init_wandb, finish_wandb
 
 
 def main():
     args = parse_args()
+
+    if args.enable_slurm and 'SLURM_SUBMIT_HOST' in os.environ:
+        servername = os.environ['SLURM_SUBMIT_HOST']
+        hostname = os.environ['SLURMD_NODENAME']
+        if hostname == servername:
+            print(f'SLURM Server: {hostname}')
+            main_s()
+        else:
+            print(f'SLURM Client: {hostname}')
+            main_c()
+        return
+
     mode = args.mode
     if mode == 'simulated':
         init_wandb(args, args.experiment_name)

@@ -1,5 +1,6 @@
 import gc
 from logging import DEBUG, INFO
+import os
 import time
 import timeit
 import traceback
@@ -301,9 +302,13 @@ class FlowerClient(flwr.client.NumPyClient):
 def main():
     args = parse_args()
 
+    ip, port = args.server_address.split(':')
+    if args.enable_slurm and 'SLURM_SUBMIT_HOST' in os.environ:
+        ip = os.environ['SLURM_SUBMIT_HOST']
+
     while True:
         try:
-            flwr.client.start_numpy_client(server_address=args.server_address, client=FlowerClient())
+            flwr.client.start_numpy_client(server_address=f'{ip}:{port}', client=FlowerClient())
         except _MultiThreadedRendezvous:
             log(DEBUG, 'Waiting for server')
             time.sleep(1.)
