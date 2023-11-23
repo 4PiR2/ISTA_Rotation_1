@@ -122,9 +122,9 @@ class FlowerClient(flwr.client.NumPyClient):
             self.stage_memory['dataloaders'] = {}
         if device not in self.stage_memory['dataloaders']:
             self.stage_memory['dataloaders'][device] = [
-                [materialize_dataloader(dl) for dl in self.train_loaders],
-                [materialize_dataloader(dl) for dl in self.val_loaders],
-                [materialize_dataloader(dl) for dl in self.test_loaders],
+                [materialize_dataloader(dl, device) for dl in self.train_loaders],
+                [materialize_dataloader(dl, device) for dl in self.val_loaders],
+                [materialize_dataloader(dl, device) for dl in self.test_loaders],
             ]
         return self.stage_memory['dataloaders'][device][is_eval][cid]
 
