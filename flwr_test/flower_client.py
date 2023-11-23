@@ -101,7 +101,9 @@ class FlowerClient(flwr.client.NumPyClient):
         # if self.enet is not None:
         #     log(INFO, f'num_parameters_enet: {count_parameters(self.enet)}')
 
-        self.get_dataloader(0, 0, torch.device('cpu'))  # prefetch datasets to RAM
+        dataset_device = torch.device('cpu')
+        self.get_dataloader(0, 0, device=dataset_device)  # prefetch datasets to RAM
+
         return super().get_properties(config)
 
     def get_dataloader(self, is_eval: int, cid: int, device: torch.device = torch.device('cpu')) -> DataLoader:
@@ -306,7 +308,7 @@ def main():
     ip, port = args.server_address.split(':')
     if args.enable_slurm and detect_slurm():
         ip = os.environ['SLURM_SUBMIT_HOST']
-        init_wandb(args, args.experiment_name, group=os.environ['SLURM_JOB_UID'])
+        init_wandb(args=args, experiment_name=args.experiment_name, group=os.environ['SLURM_JOB_UID'])
 
     while True:
         try:

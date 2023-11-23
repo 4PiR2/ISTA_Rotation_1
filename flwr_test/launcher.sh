@@ -18,21 +18,15 @@
 ###SBATCH --constraint=GTX1080Ti
 
 #SBATCH --job-name=Flower
+
+mkdir -p outputs/slurm
 #SBATCH --output=outputs/slurm/out.txt
 
-#Send emails when a job starts, it is finished or it exits
-###SBATCH --mail-user=YourEmail@ist.ac.at
-###SBATCH --mail-type=ALL
-
-#Pick whether you prefer requeue or not. If you use the --requeue
-#option, the requeued job script will start from the beginning,
-#potentially overwriting your previous progress, so be careful.
-#For some people the --requeue option might be desired if their
-#application will continue from the last state.
-#Do not requeue the job in the case it fails.
-#SBATCH --no-requeue
-
-unset SLURM_EXPORT_ENV
-
-#run the binary through SLURM's srun
-srun --cpu_bind=verbose bash -c "python3 launcher.py --num-step-clients 5 --num-rounds 1000 --eval-interval 0 >> outputs/slurm/out_\$(hostname).txt"
+srun --cpu_bind=verbose bash -c "
+python3 launcher.py
+--args \"slurm_job_nodelist=[$(scontrol show hostnames $SLURM_JOB_NODELIST)]\"
+--num-step-clients 5
+--num-rounds 1000
+--eval-interval 0
+&> outputs/slurm/out_\$(hostname).txt
+"
