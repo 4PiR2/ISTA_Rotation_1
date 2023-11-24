@@ -759,11 +759,19 @@ def make_server(args: argparse.Namespace):
 
 def main():
     args = parse_args()
-    init_wandb(
-        args=args,
-        experiment_name=args.experiment_name,
-        group=os.environ['SLURM_JOB_ID'] if args.enable_slurm and detect_slurm() else None
-    )
+    if args.enable_slurm and detect_slurm():
+        init_wandb(
+            args=args,
+            experiment_name=f"{os.environ['SLURM_JOB_ID']}-S{os.environ['SLURM_NODEID']}-{os.environ['SLURMD_NODENAME']}",
+            group=os.environ['SLURM_JOB_ID'],
+        )
+    else:
+        init_wandb(
+            args=args,
+            experiment_name=args.experiment_name,
+            group=None,
+        )
+
     server = make_server(args)
     flwr.server.start_server(
         server_address=f"0.0.0.0:{args.server_address.split(':')[-1]}",

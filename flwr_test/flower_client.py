@@ -308,7 +308,11 @@ def main():
     ip, port = args.server_address.split(':')
     if args.enable_slurm and detect_slurm():
         ip = os.environ['SLURM_SUBMIT_HOST']
-        init_wandb(args=args, experiment_name=args.experiment_name, group=os.environ['SLURM_JOB_ID'])
+        init_wandb(
+            args=args,
+            experiment_name=f"{os.environ['SLURM_JOB_ID']}-C{os.environ['SLURM_NODEID']}-{os.environ['SLURMD_NODENAME']}",
+            group=os.environ['SLURM_JOB_ID'],
+        )
 
     while True:
         try:
