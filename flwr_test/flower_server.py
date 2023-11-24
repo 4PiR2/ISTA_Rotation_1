@@ -762,7 +762,7 @@ def main():
     init_wandb(
         args=args,
         experiment_name=args.experiment_name,
-        group=os.environ['SLURM_JOB_UID'] if args.enable_slurm and detect_slurm() else None
+        group=os.environ['SLURM_JOB_ID'] if args.enable_slurm and detect_slurm() else None
     )
     server = make_server(args)
     flwr.server.start_server(

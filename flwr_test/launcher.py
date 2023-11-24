@@ -26,7 +26,7 @@ def main():
 
     mode = args.mode
     if mode == 'simulated':
-        init_wandb(args=args, experiment_name=args.experiment_name)
+        init_wandb(args=args, experiment_name=args.experiment_name, group=None)
         server = make_server(args)
         config = {
             'num_train_clients': server.strategy.num_train_clients,

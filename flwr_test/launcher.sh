@@ -23,10 +23,10 @@ mkdir -p outputs/slurm
 #SBATCH --output=outputs/slurm/out.txt
 
 srun --cpu_bind=verbose bash -c "
-python3 launcher.py
---args \"slurm_job_nodelist=[$(scontrol show hostnames $SLURM_JOB_NODELIST)]\"
---num-step-clients 5
---num-rounds 1000
---eval-interval 0
+python3 launcher.py \\
+--args \"slurm_job_nodelist=[$(scontrol show hostnames $SLURM_JOB_NODELIST)]\" \\
+--num-step-clients 5 \\
+--num-rounds 1000 \\
+--eval-interval 0 \\
 &> outputs/slurm/out_\$(hostname).txt
 "
