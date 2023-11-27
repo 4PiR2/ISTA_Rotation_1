@@ -200,7 +200,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
                     self.optimizer_hnet: Optional[torch.optim.Optimizer] = torch.optim.Adam(
                         self.hnet.parameters(),
                         lr=optimizer_hyper_lr,
-                        weight_decay=0.,
+                        weight_decay=optimizer_hyper_weight_decay,
                     )
                 case 'sgd':
                     self.optimizer_hnet: Optional[torch.optim.Optimizer] = torch.optim.SGD(
@@ -217,7 +217,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
                     self.optimizer_net: Optional[torch.optim.Optimizer] = torch.optim.Adam(
                         params=[torch.nn.Parameter(torch.empty(0, device=self.server_device))],
                         lr=optimizer_embed_lr,
-                        weight_decay=0.,
+                        weight_decay=optimizer_embed_weight_decay,
                     )
                 case 'sgd':
                     self.optimizer_net: Optional[torch.optim.Optimizer] = torch.optim.SGD(
@@ -651,7 +651,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             'cid': cid,
             'device': device,
             'stage': 6,
-            'is_eval': True,
+            'is_eval': True + self.eval_test,
             'client_eval_embed_train_split': self.client_eval_embed_train_split,
         }), timeout=None)
         time_6s_start = timeit.default_timer()
@@ -671,7 +671,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             'cid': cid,
             'device': device,
             'stage': 7,
-            'is_eval': True,
+            'is_eval': True + self.eval_test,
             'client_eval_mask_absent': self.client_eval_mask_absent,
         }), timeout=None)
         time_7s_start = timeit.default_timer()
@@ -700,7 +700,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             'cid': cid,
             'device': device,
             'stage': 2,
-            'is_eval': True,
+            'is_eval': True + self.eval_test,
         }), timeout=None)
         time_2s_start = timeit.default_timer()
         assert res.status.code == Code.OK

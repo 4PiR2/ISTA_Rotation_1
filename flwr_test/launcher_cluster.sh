@@ -1,13 +1,12 @@
 #!/bin/bash
 
 #SBATCH --partition=gpu
-###SBATCH --constraint="epsilon|delta|beta|leonid|serbyn|gamma|zeta"
 
 #SBATCH --nodes=6
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem-per-cpu=1G
-#SBATCH --gpus-per-node 1
+#SBATCH --gpus-per-node=1
 
 #Maximum runtime is limited to 10 days, ie. 240 hours
 #SBATCH --time=05:59:59

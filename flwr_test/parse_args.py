@@ -1,5 +1,4 @@
 import argparse
-from typing import Optional
 
 from PeFLL.utils import str2bool
 
@@ -55,11 +54,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--client-target-num-batches', type=int, default=50, help='number of inner steps')
     parser.add_argument('--optimizer-embed-type', type=str, default='adam', choices=['adam', 'sgd'], help='learning rate')
     parser.add_argument('--optimizer-embed-lr', type=float, default=2e-4, help='embedding learning rate')
-    parser.add_argument('--optimizer-embed-weight-decay', type=float, default=1e-3, help="weight decay")
+    parser.add_argument('--optimizer-embed-weight-decay', type=float, default=1e-3, help='weight decay')
     parser.add_argument('--client-embed-num-batches', type=int, default=1, help='batches used to estimate rescaling')
     parser.add_argument('--optimizer-hyper-type', type=str, default='adam', choices=['adam', 'sgd'], help='learning rate')
     parser.add_argument('--optimizer-hyper-lr', type=float, default=2e-4, help='learning rate')
-    parser.add_argument('--optimizer-hyper-weight-decay', type=float, default=1e-3, help="weight decay")
+    parser.add_argument('--optimizer-hyper-weight-decay', type=float, default=1e-3, help='weight decay')
     parser.add_argument('--client-eval-mask-absent', type=str2bool, default=True, help='mask absent classes at eval')
     parser.add_argument('--client-eval-embed-train-split', type=bool, default=True, help='use train or test data to embed')
 
