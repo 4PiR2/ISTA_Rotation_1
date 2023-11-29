@@ -66,12 +66,12 @@ class FlowerClient(flwr.client.NumPyClient):
         )
 
         n_kernels = config['model_num_kernels']
+        model_target_type = config['model_target_type']
         model_embed_type = config['model_embed_type']
         embed_dim = config['model_embed_dim']
         if embed_dim == -1:
             embed_dim = 1 + num_users // 4  # auto embedding size
-        embed_y = config['client_model_embed_y'] and model_embed_type != 'head'
-        model_target_type = config['model_target_type']
+        embed_y = config['client_model_embed_y'] and model_target_type != 'head'
         device = torch.device('cpu')
 
         match data_name, model_target_type:
