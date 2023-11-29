@@ -70,7 +70,7 @@ class FlowerClient(flwr.client.NumPyClient):
         embed_dim = config['model_embed_dim']
         if embed_dim == -1:
             embed_dim = 1 + num_users // 4  # auto embedding size
-        embed_y = config['client_model_embed_y']
+        embed_y = config['client_model_embed_y'] and model_embed_type != 'head'
         model_target_type = config['model_target_type']
         device = torch.device('cpu')
 
@@ -265,11 +265,11 @@ class FlowerClient(flwr.client.NumPyClient):
                 match model_target_type, is_eval:
                     case 'head', 0:
                         with torch.no_grad():
-                            inputs = self.enet((images, labels))
+                            inputs = self.enet((images, None))
                         outputs = self.tnet(inputs)
                     case 'head', _:
                         with torch.no_grad():
-                            inputs = self.enet((images, labels))
+                            inputs = self.enet((images, None))
                             outputs = self.tnet(inputs)
                     case _, 0:
                         outputs = self.tnet(images)

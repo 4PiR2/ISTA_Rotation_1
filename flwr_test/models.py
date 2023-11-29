@@ -129,9 +129,9 @@ class HeadHyper(nn.Module):
         # self.c2_bias = nn.Linear(hidden_dim, 2 * self.n_kernels)
         # self.l1_weights = nn.Linear(hidden_dim, 120 * 2 * self.n_kernels * 5 * 5)
         # self.l1_bias = nn.Linear(hidden_dim, 120)
-        self.l2_weights = nn.Linear(hidden_dim, 84 * self.embedding_dim)
-        self.l2_bias = nn.Linear(hidden_dim, 84)
-        self.l3_weights = nn.Linear(hidden_dim, self.out_dim * 84)
+        # self.l2_weights = nn.Linear(hidden_dim, 84 * 120)
+        # self.l2_bias = nn.Linear(hidden_dim, 84)
+        self.l3_weights = nn.Linear(hidden_dim, self.out_dim * self.embedding_dim)
         self.l3_bias = nn.Linear(hidden_dim, self.out_dim)
 
         if spec_norm:
@@ -141,8 +141,8 @@ class HeadHyper(nn.Module):
             # self.c2_bias = spectral_norm(self.c2_bias)
             # self.l1_weights = spectral_norm(self.l1_weights)
             # self.l1_bias = spectral_norm(self.l1_bias)
-            self.l2_weights = spectral_norm(self.l2_weights)
-            self.l2_bias = spectral_norm(self.l2_bias)
+            # self.l2_weights = spectral_norm(self.l2_weights)
+            # self.l2_bias = spectral_norm(self.l2_bias)
             self.l3_weights = spectral_norm(self.l3_weights)
             self.l3_bias = spectral_norm(self.l3_bias)
 
@@ -157,9 +157,9 @@ class HeadHyper(nn.Module):
             # "conv2.bias": self.c2_bias(features).view(*batch_dims, 2 * self.n_kernels),
             # "fc1.weight": self.l1_weights(features).view(*batch_dims, 120, 2 * self.n_kernels * 5 * 5),
             # "fc1.bias": self.l1_bias(features).view(*batch_dims, 120),
-            "fc2.weight": self.l2_weights(features).view(*batch_dims, 84, self.embedding_dim),
-            "fc2.bias": self.l2_bias(features).view(*batch_dims, 84),
-            "fc3.weight": self.l3_weights(features).view(*batch_dims, self.out_dim, 84),
+            # "fc2.weight": self.l2_weights(features).view(*batch_dims, 84, 120),
+            # "fc2.bias": self.l2_bias(features).view(*batch_dims, 84),
+            "fc3.weight": self.l3_weights(features).view(*batch_dims, self.out_dim, self.embedding_dim),
             "fc3.bias": self.l3_bias(features).view(*batch_dims, self.out_dim),
         }
         return weights
@@ -168,9 +168,7 @@ class HeadHyper(nn.Module):
 class HeadTarget(nn.Module):
     def __init__(self, embed_dim: int, out_dim: int):
         super().__init__()
-        self.fc2 = nn.Linear(embed_dim, 84)
-        self.fc3 = nn.Linear(in_features=84, out_features=out_dim, bias=True)
+        self.fc3 = nn.Linear(in_features=embed_dim, out_features=out_dim, bias=True)
 
     def forward(self, x):
-        x = F.relu(self.fc2(x))
         return self.fc3(x)
