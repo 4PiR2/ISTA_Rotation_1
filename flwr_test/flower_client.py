@@ -18,6 +18,7 @@ from PeFLL.dataset import gen_random_loaders
 from PeFLL.models import CNNTarget, CNNEmbed, MLPEmbed
 from PeFLL.utils import set_seed, count_parameters
 
+from models import HeadTarget
 from parse_args import parse_args
 from utils import state_dicts_to_ndarrays, ndarrays_to_state_dicts, detect_slurm, init_wandb, finish_wandb
 
@@ -65,25 +66,32 @@ class FlowerClient(flwr.client.NumPyClient):
         )
 
         n_kernels = config['model_num_kernels']
-        embed_model = config['model_embed_type']
+        model_embed_type = config['model_embed_type']
         embed_dim = config['model_embed_dim']
         if embed_dim == -1:
             embed_dim = 1 + num_users // 4  # auto embedding size
         embed_y = config['client_model_embed_y']
+        model_target_type = config['model_target_type']
         device = torch.device('cpu')
 
-        match data_name:
-            case 'cifar10':
+        match data_name, model_target_type:
+            case 'cifar10', 'cnn':
                 self.tnet = CNNTarget(in_channels=3, n_kernels=n_kernels, out_dim=10)
-            case 'cifar100':
+            case 'cifar10', 'head':
+                self.tnet = HeadTarget(embed_dim=embed_dim, out_dim=10)
+            case 'cifar100', 'cnn':
                 self.tnet = CNNTarget(in_channels=3, n_kernels=n_kernels, out_dim=100)
-            case 'femnist':
+            case 'cifar100', 'head':
+                self.tnet = HeadTarget(embed_dim=embed_dim, out_dim=100)
+            case 'femnist', 'cnn':
                 self.tnet = CNNTarget(in_channels=1, n_kernels=n_kernels, out_dim=62)
+            case 'femnist', 'head':
+                self.tnet = HeadTarget(embed_dim=embed_dim, out_dim=62)
             case _:
                 raise ValueError("Choose data_name from ['cifar10', 'cifar100', 'femnist'].")
         # log(INFO, f'num_parameters_tnet: {count_parameters(self.tnet)}')
 
-        match data_name, embed_model:
+        match data_name, model_embed_type:
             case 'cifar10', 'mlp':
                 self.enet = MLPEmbed(in_dim=10, out_dim=embed_dim)
             case 'cifar10', 'cnn':
@@ -243,6 +251,9 @@ class FlowerClient(flwr.client.NumPyClient):
         else:
             classes_present = 0.
 
+        model_target_type = config['model_target_type']
+        self.enet.eval()
+
         i, length, total_loss, total_correct = 0, 0, 0., 0.
         while i < num_batches:
             for images, labels in dataloader:
@@ -251,11 +262,20 @@ class FlowerClient(flwr.client.NumPyClient):
                 i += 1
                 length += len(labels)
                 images, labels = images.to(device), labels.to(device)
-                if not is_eval:
-                    outputs = self.tnet(images)
-                else:
-                    with torch.no_grad():
+                match model_target_type, is_eval:
+                    case 'head', 0:
+                        with torch.no_grad():
+                            inputs = self.enet((images, labels))
+                        outputs = self.tnet(inputs)
+                    case 'head', _:
+                        with torch.no_grad():
+                            inputs = self.enet((images, labels))
+                            outputs = self.tnet(inputs)
+                    case _, 0:
                         outputs = self.tnet(images)
+                    case _, _:
+                        with torch.no_grad():
+                            outputs = self.tnet(images)
                 loss = criterion(outputs, labels)
                 if not is_eval:
                     optimizer.zero_grad()

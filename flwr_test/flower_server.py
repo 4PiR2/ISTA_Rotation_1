@@ -37,6 +37,7 @@ import wandb
 from PeFLL.models import CNNHyper
 from PeFLL.utils import set_seed, count_parameters
 
+from models import HeadHyper
 from parse_args import parse_args
 from utils import aggregate_tensor, ndarrays_to_state_dicts, state_dicts_to_ndarrays, init_wandb, finish_wandb, \
     get_pefll_checkpoint, detect_slurm
@@ -69,6 +70,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             client_model_embed_model_y: bool = True,
             model_hyper_hid_layers: int = 3,
             model_hyper_hid_dim: int = 100,
+            model_target_type: str = 'cnn',
             client_optimizer_target_lr: float = 2e-3,
             client_optimizer_target_momentum: float = .9,
             client_optimizer_target_weight_decay: float = 5e-5,
@@ -145,6 +147,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
         self.client_model_embed_y: bool = client_model_embed_model_y
         self.model_hyper_hid_layers: int = model_hyper_hid_layers
         self.model_hyper_hid_dim: int = model_hyper_hid_dim
+        self.model_target_type: str = model_target_type
         self.client_optimizer_target_lr: float = client_optimizer_target_lr
         self.client_optimizer_target_momentum: float = client_optimizer_target_momentum
         self.client_optimizer_target_weight_decay: float = client_optimizer_target_weight_decay
@@ -179,16 +182,32 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
 
             if model_embed_dim == -1:
                 model_embed_dim = 1 + client_dataset_num_clients // 4
-            self.hnet: Optional[torch.nn.Module] = CNNHyper(
-                n_nodes=client_dataset_num_clients,
-                embedding_dim=model_embed_dim,
-                in_channels=hnet_in_channels,
-                out_dim=hnet_out_dim,
-                n_kernels=model_num_kernels,
-                hidden_dim=model_hyper_hid_dim,
-                spec_norm=False,
-                n_hidden=model_hyper_hid_layers,
-            ).to(device=self.server_device)
+            match self.model_target_type:
+                case 'cnn':
+                    self.hnet: Optional[torch.nn.Module] = CNNHyper(
+                        n_nodes=client_dataset_num_clients,
+                        embedding_dim=model_embed_dim,
+                        in_channels=hnet_in_channels,
+                        out_dim=hnet_out_dim,
+                        n_kernels=model_num_kernels,
+                        hidden_dim=model_hyper_hid_dim,
+                        spec_norm=False,
+                        n_hidden=model_hyper_hid_layers,
+                    ).to(device=self.server_device)
+                case 'head':
+                    self.hnet: Optional[torch.nn.Module] = HeadHyper(
+                        n_nodes=client_dataset_num_clients,
+                        embedding_dim=model_embed_dim,
+                        in_channels=hnet_in_channels,
+                        out_dim=hnet_out_dim,
+                        n_kernels=model_num_kernels,
+                        hidden_dim=model_hyper_hid_dim,
+                        spec_norm=False,
+                        n_hidden=model_hyper_hid_layers,
+                    ).to(device=self.server_device)
+                case _:
+                    raise NotImplementedError
+
             log(INFO, f'num_parameters_hnet: {count_parameters(self.hnet)}')
 
             with torch.no_grad():
@@ -279,6 +298,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             'model_embed_type': self.model_embed_type,
             'model_embed_dim': self.model_embed_dim,
             'client_model_embed_y': self.client_model_embed_y,
+            'model_target_type': self.model_target_type,
         }
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             submitted_fs = {
@@ -520,6 +540,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             'client_optimizer_target_momentum': self.client_optimizer_target_momentum,
             'client_optimizer_target_weight_decay': self.client_optimizer_target_weight_decay,
             'client_target_num_batches': self.client_target_num_batches,
+            'model_target_type': self.model_target_type,
         }), timeout=None)
         time_4s_start = timeit.default_timer()
         assert res.status.code == Code.OK
@@ -581,6 +602,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             'client_optimizer_target_momentum': self.client_optimizer_target_momentum,
             'client_optimizer_target_weight_decay': self.client_optimizer_target_weight_decay,
             'client_target_num_batches': self.client_target_num_batches,
+            'model_target_type': self.model_target_type,
         }), timeout=None)
         time_1s_start = timeit.default_timer()
         assert res.status.code == Code.OK
@@ -673,6 +695,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             'stage': 7,
             'is_eval': True + self.eval_test,
             'client_eval_mask_absent': self.client_eval_mask_absent,
+            'model_target_type': self.model_target_type,
         }), timeout=None)
         time_7s_start = timeit.default_timer()
         assert res.status.code == Code.OK
@@ -701,6 +724,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             'device': device,
             'stage': 2,
             'is_eval': True + self.eval_test,
+            'model_target_type': self.model_target_type,
         }), timeout=None)
         time_2s_start = timeit.default_timer()
         assert res.status.code == Code.OK
@@ -741,6 +765,7 @@ def make_server(args: argparse.Namespace):
         client_model_embed_model_y=args.client_model_embed_y,
         model_hyper_hid_layers=args.model_hyper_hid_layers,
         model_hyper_hid_dim=args.model_hyper_hid_dim,
+        model_target_type=args.model_target_type,
         client_optimizer_target_lr=args.client_optimizer_target_lr,
         client_optimizer_target_momentum=args.client_optimizer_target_momentum,
         client_optimizer_target_weight_decay=args.client_optimizer_target_weight_decay,
