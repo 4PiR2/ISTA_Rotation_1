@@ -34,10 +34,9 @@ import numpy as np
 import torch
 import wandb
 
-from PeFLL.models import CNNHyper
 from PeFLL.utils import set_seed, count_parameters
 
-from models import HeadHyper, HeadTarget
+from models import Hyper
 from parse_args import parse_args
 from utils import aggregate_tensor, ndarrays_to_state_dicts, state_dicts_to_ndarrays, init_wandb, finish_wandb, \
     get_pefll_checkpoint, detect_slurm
@@ -166,61 +165,16 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
         if model_embed_type != 'none':
             self.hnet_grads: Optional[queue.Queue] = queue.Queue()
 
-            match client_dataset_data_name:
-                case 'cifar10':
-                    hnet_in_channels = 3
-                    hnet_out_dim = 10
-                case 'cifar100':
-                    hnet_in_channels = 3
-                    hnet_out_dim = 100
-                case 'femnist':
-                    client_dataset_num_clients = 3597
-                    hnet_in_channels = 1
-                    hnet_out_dim = 62
-                case _:
-                    raise NotImplementedError
-
-            if model_embed_dim == -1:
-                model_embed_dim = 1 + client_dataset_num_clients // 4
-            match self.model_target_type:
-                case 'cnn':
-                    self.hnet: Optional[torch.nn.Module] = CNNHyper(
-                        n_nodes=client_dataset_num_clients,
-                        embedding_dim=model_embed_dim,
-                        in_channels=hnet_in_channels,
-                        out_dim=hnet_out_dim,
-                        n_kernels=model_num_kernels,
-                        hidden_dim=model_hyper_hid_dim,
-                        spec_norm=False,
-                        n_hidden=model_hyper_hid_layers,
-                    ).to(device=self.server_device)
-                case 'head':
-                    self.hnet: Optional[torch.nn.Module] = HeadHyper(
-                        example_state_dict=HeadTarget(in_dim=model_embed_dim, hidden_dim=model_embed_dim, out_dim=10, n_layers=3).state_dict(),
-                        embedding_dim=model_embed_dim,
-                        hidden_dim=model_hyper_hid_dim,
-                        n_hidden=model_hyper_hid_layers,
-                        spec_norm=False,
-                    ).to(device=self.server_device)
-                case _:
-                    raise NotImplementedError
-
-            log(INFO, f'num_parameters_hnet: {count_parameters(self.hnet)}')
-
-            with torch.no_grad():
-                tnet_dummy = self.hnet(torch.zeros(model_embed_dim, device=self.server_device))
-            log(INFO, f'num_parameters_tnet: {sum([v.numel() for v in tnet_dummy.values()])}')
-
             match optimizer_hyper_type:
                 case 'adam':
                     self.optimizer_hnet: Optional[torch.optim.Optimizer] = torch.optim.Adam(
-                        self.hnet.parameters(),
+                        params=[torch.nn.Parameter(torch.empty(0, device=self.server_device))],
                         lr=optimizer_hyper_lr,
                         weight_decay=optimizer_hyper_weight_decay,
                     )
                 case 'sgd':
                     self.optimizer_hnet: Optional[torch.optim.Optimizer] = torch.optim.SGD(
-                        self.hnet.parameters(),
+                        params=[torch.nn.Parameter(torch.empty(0, device=self.server_device))],
                         lr=optimizer_hyper_lr,
                         momentum=.9,
                         weight_decay=optimizer_hyper_weight_decay,
@@ -307,51 +261,61 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             assert future.exception() is None
 
     def initialize_parameters(self, client_manager: ClientManager) -> Optional[Parameters]:
-        parameters = super().initialize_parameters(client_manager)
+        # Get initial parameters from one of the clients
+        log(INFO, "Requesting initial parameters from one random client")
+        random_client = client_manager.sample(1)[0]
+        ins = GetParametersIns(config={})
+        get_parameters_res = random_client.get_parameters(ins=ins, timeout=None)
+        client_parameters = get_parameters_res.parameters
+        log(INFO, "Received initial parameters from one random client")
+        state_dicts = ndarrays_to_state_dicts(parameters_to_ndarrays(client_parameters), self.server_device)
+        for name, sd in state_dicts.items():
+            log(INFO, f"num_parameters_{name}: {sum([v.numel() for v in sd.values()])}")
+        # count = sum([v.numel() for sd in state_dicts.values() for v in sd.values()])
+
+        if self.model_embed_type != 'none':
+            self.hnet = Hyper(
+                example_state_dict=state_dicts['tnet'],
+                embedding_dim=len(state_dicts['enet']['fc3.bias']),
+                hidden_dim=self.model_hyper_hid_dim,
+                n_hidden=self.model_hyper_hid_layers,
+                spec_norm=False,
+            ).to(device=self.server_device)
+            self.optimizer_hnet.add_param_group({'params': self.hnet.parameters()})
+            log(INFO, f'num_parameters_hnet: {count_parameters(self.hnet)}')
+
         net_name = 'tnet' if self.model_embed_type == 'none' else 'enet'
-        if parameters is None and self.init_round:
-            state_dicts = {net_name: torch.load(os.path.join(
+
+        if self.init_round:
+            log(INFO, "Using initial parameters provided by strategy")
+            state_dicts[net_name] = torch.load(os.path.join(
                 self.log_dir, self.experiment_name, 'checkpoints', f'model_{net_name}_round_{self.init_round}.pth'
-            ), map_location=self.server_device)}
-            # state_dicts = {net_name: get_pefll_checkpoint()[f'{net_name}_state_dict']}
-            parameters = ndarrays_to_parameters(state_dicts_to_ndarrays(state_dicts))
-            if self.hnet is not None:
-                state_dict = torch.load(os.path.join(
+            ), map_location=self.server_device)
+            # state_dicts[net_name] = get_pefll_checkpoint()[f'{net_name}_state_dict']
+
+            if self.model_embed_type != 'none':
+                state_dict_hnet = torch.load(os.path.join(
                     self.log_dir, self.experiment_name, 'checkpoints', f'model_{"hnet"}_round_{self.init_round}.pth'
                 ), map_location=self.server_device)
-                # state_dict = get_pefll_checkpoint()['hnet_state_dict']
-                self.hnet.load_state_dict(state_dict, strict=True)
-        if parameters is None:
-            # Get initial parameters from one of the clients
-            log(INFO, "Requesting initial parameters from one random client")
-            random_client = client_manager.sample(1)[0]
-            ins = GetParametersIns(config={'net_name': net_name})
-            get_parameters_res = random_client.get_parameters(ins=ins, timeout=None)
-            parameters = get_parameters_res.parameters
-            log(INFO, "Received initial parameters from one random client")
-        else:
-            log(INFO, "Using initial parameters provided by strategy")
+                # state_dict_hnet = get_pefll_checkpoint()['hnet_state_dict']
+                self.hnet.load_state_dict(state_dict_hnet, strict=True)
 
-        state_dicts = ndarrays_to_state_dicts(parameters_to_ndarrays(parameters), self.server_device)
-        count = sum([v.numel() for sd in state_dicts.values() for v in sd.values()])
+                path = os.path.join(self.log_dir, self.experiment_name, 'checkpoints',
+                                    f'optimizer_{"enet"}_round_{self.init_round}.pth')
+                if os.path.exists(path):
+                    self.optimizer_net.load_state_dict(torch.load(path, map_location=self.server_device))
+                path = os.path.join(self.log_dir, self.experiment_name, 'checkpoints',
+                                    f'optimizer_{"hnet"}_round_{self.init_round}.pth')
+                if os.path.exists(path):
+                    self.optimizer_hnet.load_state_dict(torch.load(path, map_location=self.server_device))
+
         if self.model_embed_type != 'none':
             self.parameters_tensor = {
                 k: torch.nn.Parameter(v) for k, v in state_dicts[net_name].items()
             }
             self.optimizer_net.add_param_group({'params': self.parameters_tensor.values()})
-            log(INFO, f'num_parameters_enet: {count}')
-        else:
-            log(INFO, f'num_parameters_tnet: {count}')
 
-        path = os.path.join(self.log_dir, self.experiment_name, 'checkpoints',
-                            f'optimizer_{"enet"}_round_{self.init_round}.pth')
-        if self.init_round and self.optimizer_net is not None and os.path.exists(path):
-            self.optimizer_net.load_state_dict(torch.load(path, map_location=self.server_device))
-        path = os.path.join(self.log_dir, self.experiment_name, 'checkpoints',
-                            f'optimizer_{"hnet"}_round_{self.init_round}.pth')
-        if self.init_round and self.optimizer_hnet is not None and os.path.exists(path):
-            self.optimizer_hnet.load_state_dict(torch.load(path, map_location=self.server_device))
-
+        parameters = ndarrays_to_parameters(state_dicts_to_ndarrays({net_name: state_dicts[net_name]}))
         return parameters
 
     def save_model(self, parameters: Parameters, server_round: int):
@@ -515,6 +479,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             'stage': 3,
             'is_eval': False,
             'client_embed_num_batches': self.client_embed_num_batches,
+            'model_target_type': self.model_target_type,
         }), timeout=None)
         time_3s_start = timeit.default_timer()
         assert res.status.code == Code.OK
@@ -562,6 +527,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             'device': device,
             'stage': 5,
             'is_eval': False,
+            # 'model_target_type': self.model_target_type,
         }), timeout=None)
         time_5s_start = timeit.default_timer()
         assert res.status.code == Code.OK
@@ -672,6 +638,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             'stage': 6,
             'is_eval': True + self.eval_test,
             'client_eval_embed_train_split': self.client_eval_embed_train_split,
+            'model_target_type': self.model_target_type,
         }), timeout=None)
         time_6s_start = timeit.default_timer()
         assert res.status.code == Code.OK

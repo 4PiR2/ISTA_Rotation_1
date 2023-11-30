@@ -209,11 +209,9 @@ class FlowerClient(flwr.client.NumPyClient):
         is_eval = config['is_eval']
 
         if not is_eval:
-            self.enet.train()
             dataloader = self.get_dataloader(is_eval, cid)  # self.train_loaders[cid]
             num_batches = config['client_embed_num_batches']
         else:
-            self.enet.eval()
             if config['client_eval_embed_train_split']:
                 dataloader = self.get_dataloader(0, cid)  # self.train_loaders[cid]
             else:
@@ -236,11 +234,22 @@ class FlowerClient(flwr.client.NumPyClient):
         label_all = torch.cat(label_all, dim=0)
 
         if not is_eval:
-            embedding = self.enet((image_all, label_all)).mean(dim=0)
+            self.enet.train()
+            embeddings = self.enet((image_all, label_all))
         else:
+            self.enet.eval()
             with torch.no_grad():
-                embedding = self.enet((image_all, label_all)).mean(dim=0)
+                embeddings = self.enet((image_all, label_all))
 
+        model_target_type = config['model_target_type']
+        if not is_eval and model_target_type == 'head':
+            x = (embeddings[:, None, None, :] @ embeddings[None, :, :, None])[:, :, 0, 0]
+            y = (label_all[:, None, None, :] @ label_all[None, :, :, None])[:, :, 0, 0]
+            sig_x = x.sigmoid()
+            loss_1 = (- sig_x[y > .5].log().sum() - (1. - sig_x[y < .5]).log().sum()) / sig_x.numel()
+            self.stage_memory['loss_1'] = loss_1
+
+        embedding = embeddings.mean(dim=0)
         embedding_ndarray = embedding.detach().cpu().numpy()
         label_count = label_all.sum(dim=0)
         self.stage_memory['embedding'] = embedding
@@ -262,6 +271,8 @@ class FlowerClient(flwr.client.NumPyClient):
                 dataloader = self.get_dataloader(is_eval, cid)
             case 'head':
                 dataloader = self.get_embed_dataloader(is_eval, cid, device)
+            case _:
+                raise NotImplementedError
 
         if not is_eval:
             self.tnet.train()
@@ -338,6 +349,8 @@ class FlowerClient(flwr.client.NumPyClient):
         embedding = self.stage_memory['embedding']
         embed_grad = torch.tensor(parameters[0], device=embedding.device)
         loss = (embed_grad * embedding).sum()
+        if 'loss_1' in self.stage_memory:
+            loss += self.stage_memory['loss_1']
         if 'loss_2' in self.stage_memory:
             loss += self.stage_memory['loss_2']
         for p in self.enet.parameters():

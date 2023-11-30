@@ -102,7 +102,7 @@ from torch.nn.utils import spectral_norm
 #         return x
 
 
-class HeadHyper(nn.Module):
+class Hyper(nn.Module):
     def __init__(
             self, example_state_dict: Dict[str, torch.Tensor], embedding_dim=26, hidden_dim=100, n_hidden=1,
             spec_norm=False,
