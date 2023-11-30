@@ -37,7 +37,7 @@ import wandb
 from PeFLL.models import CNNHyper
 from PeFLL.utils import set_seed, count_parameters
 
-from models import HeadHyper
+from models import HeadHyper, HeadTarget
 from parse_args import parse_args
 from utils import aggregate_tensor, ndarrays_to_state_dicts, state_dicts_to_ndarrays, init_wandb, finish_wandb, \
     get_pefll_checkpoint, detect_slurm
@@ -196,14 +196,11 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
                     ).to(device=self.server_device)
                 case 'head':
                     self.hnet: Optional[torch.nn.Module] = HeadHyper(
-                        n_nodes=client_dataset_num_clients,
+                        example_state_dict=HeadTarget(in_dim=model_embed_dim, hidden_dim=model_embed_dim, out_dim=10, n_layers=3).state_dict(),
                         embedding_dim=model_embed_dim,
-                        in_channels=hnet_in_channels,
-                        out_dim=hnet_out_dim,
-                        n_kernels=model_num_kernels,
                         hidden_dim=model_hyper_hid_dim,
-                        spec_norm=False,
                         n_hidden=model_hyper_hid_layers,
+                        spec_norm=False,
                     ).to(device=self.server_device)
                 case _:
                     raise NotImplementedError

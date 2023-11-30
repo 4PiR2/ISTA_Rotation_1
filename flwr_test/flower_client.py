@@ -78,15 +78,15 @@ class FlowerClient(flwr.client.NumPyClient):
             case 'cifar10', 'cnn':
                 self.tnet = CNNTarget(in_channels=3, n_kernels=n_kernels, out_dim=10)
             case 'cifar10', 'head':
-                self.tnet = HeadTarget(embed_dim=embed_dim, out_dim=10)
+                self.tnet = HeadTarget(in_dim=embed_dim, hidden_dim=embed_dim, out_dim=10, n_layers=3)
             case 'cifar100', 'cnn':
                 self.tnet = CNNTarget(in_channels=3, n_kernels=n_kernels, out_dim=100)
             case 'cifar100', 'head':
-                self.tnet = HeadTarget(embed_dim=embed_dim, out_dim=100)
+                self.tnet = HeadTarget(in_dim=embed_dim, hidden_dim=embed_dim, out_dim=100, n_layers=3)
             case 'femnist', 'cnn':
                 self.tnet = CNNTarget(in_channels=1, n_kernels=n_kernels, out_dim=62)
             case 'femnist', 'head':
-                self.tnet = HeadTarget(embed_dim=embed_dim, out_dim=62)
+                self.tnet = HeadTarget(in_dim=embed_dim, hidden_dim=embed_dim, out_dim=62, n_layers=3)
             case _:
                 raise ValueError("Choose data_name from ['cifar10', 'cifar100', 'femnist'].")
         # log(INFO, f'num_parameters_tnet: {count_parameters(self.tnet)}')
@@ -149,17 +149,17 @@ class FlowerClient(flwr.client.NumPyClient):
         self.enet = self.enet.to(device)
         self.enet.eval()
         xs, ys = [], []
-        for images, labels in dataloader:
-            if not is_eval:
-                embeddings = self.enet((images.to(device), None))
-            else:
-                with torch.no_grad():
-                    embeddings = self.enet((images.to(device), None))
-            xs.append(embeddings)
-            ys.append(labels)
-        xs = torch.cat(xs, dim=0)
-        ys = torch.cat(ys, dim=0)
-        dataset = TensorDataset(xs, ys)
+        for x, y in dataloader.dataset:
+            xs.append(x.to(device))
+            ys.append(y.to(device))
+        xs = torch.stack(xs, dim=0)
+        ys = torch.stack(ys, dim=0)
+        if not is_eval:
+            embeddings = self.enet((xs, None))
+        else:
+            with torch.no_grad():
+                embeddings = self.enet((xs, None))
+        dataset = TensorDataset(embeddings, ys)
         dataloader_kwargs = {
             k: v for k, v in vars(dataloader).items() if not k.startswith('_') and k not in ['batch_sampler']
         }
