@@ -42,7 +42,32 @@ class CNNEmbed2(nn.Module):
             nn.Linear(8 * n_kernels, embed_dim),  # (B, E)
         ]
 
-        self.layers = nn.Sequential(*layers2)
+        layers3 = [
+            nn.Conv2d(in_channels=in_channels + embed_y * dim_y, out_channels=n_kernels, kernel_size=3, stride=2, padding=1),  # (B, C, 16, 16)
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels=n_kernels, out_channels=n_kernels, kernel_size=3, stride=1, padding=1),  # (B, C, 16, 16)
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels=n_kernels, out_channels=2 * n_kernels, kernel_size=3, stride=2, padding=1),  # (B, 2C, 8, 8)
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels=2 * n_kernels, out_channels=2 * n_kernels, kernel_size=3, stride=1, padding=1),  # (B, 2C, 8, 8)
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels=2 * n_kernels, out_channels=4 * n_kernels, kernel_size=3, stride=2, padding=1),  # (B, 4C, 4, 4)
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels=4 * n_kernels, out_channels=4 * n_kernels, kernel_size=3, stride=1, padding=1),  # (B, 4C, 4, 4)
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels=4 * n_kernels, out_channels=8 * n_kernels, kernel_size=3, stride=2, padding=1),  # (B, 8C, 2, 2)
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels=8 * n_kernels, out_channels=8 * n_kernels, kernel_size=3, stride=1, padding=1),  # (B, 8C, 2, 2)
+            nn.ReLU(inplace=True),
+            nn.Flatten(start_dim=-3, end_dim=-1),  # (B, 32C)
+            nn.Linear(32 * n_kernels, 16 * n_kernels),  # (B, 16C)
+            nn.ReLU(inplace=True),
+            nn.Linear(16 * n_kernels, 8 * n_kernels),  # (B, 8C)
+            nn.ReLU(inplace=True),
+            nn.Linear(8 * n_kernels, embed_dim),  # (B, E)
+        ]
+
+        self.layers = nn.Sequential(*layers3)
 
     def forward(self, x: torch.Tensor | Tuple[torch.Tensor, torch.Tensor], y: Optional[torch.Tensor] = None):
         if not isinstance(x, torch.Tensor):
@@ -61,16 +86,14 @@ class Hyper(nn.Module):
     ):
         super().__init__()
 
-        layers = [
-            spectral_norm(nn.Linear(embedding_dim, hidden_dim)) if spec_norm else nn.Linear(embedding_dim, hidden_dim),
-        ]
-        for _ in range(n_hidden):
-            layers.append(nn.ReLU(inplace=True))
-            layers.append(
-                spectral_norm(nn.Linear(hidden_dim, hidden_dim)) if spec_norm else nn.Linear(hidden_dim, hidden_dim),
-            )
-
-        self.mlp = nn.Sequential(*layers)
+        mlp_layers = []
+        for i in range(n_hidden + 1):
+            linear_layer = nn.Linear(embedding_dim if i == 0 else hidden_dim, hidden_dim)
+            mlp_layers.append(spectral_norm(linear_layer) if spec_norm else linear_layer)
+            # if i != n_hidden:
+            #     mlp_layers.append(nn.ReLU(inplace=True))
+            mlp_layers.append(nn.ReLU(inplace=True))
+        self.mlp = nn.Sequential(*mlp_layers)
 
         layer_dict = {}
         for key, value in example_state_dict.items():
