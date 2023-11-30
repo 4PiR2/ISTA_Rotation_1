@@ -15,9 +15,11 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset
 
 from PeFLL.dataset import gen_random_loaders
-from PeFLL.models import CNNTarget, CNNEmbed, MLPEmbed
+from PeFLL.models import CNNTarget, MLPEmbed
 from PeFLL.utils import set_seed, count_parameters
+# from PeFLL.models import CNNEmbed
 
+from models import CNNEmbed2 as CNNEmbed
 from models import HeadTarget
 from parse_args import parse_args
 from utils import state_dicts_to_ndarrays, ndarrays_to_state_dicts, detect_slurm, init_wandb, finish_wandb
@@ -358,9 +360,9 @@ class FlowerClient(flwr.client.NumPyClient):
         loss = (embed_grad * embedding).sum()
         metrics = {'loss_e': loss.item()}
         if 'loss_1' in self.stage_memory:
-            loss += self.stage_memory['loss_1'] * 0.
+            loss += self.stage_memory['loss_1']
         if 'loss_2' in self.stage_memory:
-            loss += self.stage_memory['loss_2'] * 0.
+            loss += self.stage_memory['loss_2']
         for p in self.enet.parameters():
             p.grad = None
         loss.backward()

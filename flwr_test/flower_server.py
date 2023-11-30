@@ -279,7 +279,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
         if self.model_embed_type != 'none':
             self.hnet = Hyper(
                 example_state_dict=state_dicts['tnet'],
-                embedding_dim=len(state_dicts['enet']['fc3.bias']),
+                embedding_dim=len(list(state_dicts['enet'].values())[-1]),  # TODO
                 hidden_dim=self.model_hyper_hid_dim,
                 n_hidden=self.model_hyper_hid_layers,
                 spec_norm=False,
