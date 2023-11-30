@@ -120,23 +120,19 @@ class Hyper(nn.Module):
 
         self.mlp = nn.Sequential(*layers)
 
-        layer_param_dict = {}
-        layer_shape_dict = {}
+        layer_dict = {}
         for key, value in example_state_dict.items():
-            if spec_norm:
-                layer_param_dict[key] = spectral_norm(nn.Linear(hidden_dim, value.numel()))
-            else:
-                layer_param_dict[key] = nn.Linear(hidden_dim, value.numel())
-            layer_shape_dict[key] = value.shape
-        self.layer_dict = nn.ParameterDict(layer_param_dict)
-        self.shape_dict = layer_shape_dict
+            linear_layer = nn.Linear(hidden_dim, value.numel())
+            layer_dict[key.replace('.', '|')] = nn.Sequential(
+                spectral_norm(linear_layer) if spec_norm else linear_layer,
+                nn.Unflatten(dim=-1, unflattened_size=value.shape),
+            )
+        self.layer_dict = nn.ParameterDict(layer_dict)
 
     def forward(self, v):
-        batch_dims = v.shape[:-1]
         features = self.mlp(v)
-
         weights = {
-            key: self.layer_dict[key](features).view(*batch_dims, *self.shape_dict[key])
+            key.replace('|', '.'): self.layer_dict[key](features)
             for key in self.layer_dict.keys()
         }
         return weights

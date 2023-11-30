@@ -70,6 +70,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             model_hyper_hid_layers: int = 3,
             model_hyper_hid_dim: int = 100,
             model_target_type: str = 'cnn',
+            model_target_head_layers: int = 2,
             client_optimizer_target_lr: float = 2e-3,
             client_optimizer_target_momentum: float = .9,
             client_optimizer_target_weight_decay: float = 5e-5,
@@ -147,6 +148,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
         self.model_hyper_hid_layers: int = model_hyper_hid_layers
         self.model_hyper_hid_dim: int = model_hyper_hid_dim
         self.model_target_type: str = model_target_type
+        self.model_target_head_layers: int = model_target_head_layers
         self.client_optimizer_target_lr: float = client_optimizer_target_lr
         self.client_optimizer_target_momentum: float = client_optimizer_target_momentum
         self.client_optimizer_target_weight_decay: float = client_optimizer_target_weight_decay
@@ -250,6 +252,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             'model_embed_dim': self.model_embed_dim,
             'client_model_embed_y': self.client_model_embed_y,
             'model_target_type': self.model_target_type,
+            'model_target_head_layers': self.model_target_head_layers,
         }
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             submitted_fs = {
@@ -284,6 +287,11 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             self.optimizer_hnet.add_param_group({'params': self.hnet.parameters()})
             log(INFO, f'num_parameters_hnet: {count_parameters(self.hnet)}')
 
+            self.parameters_tensor = {
+                k: torch.nn.Parameter(v) for k, v in state_dicts['enet'].items()
+            }
+            self.optimizer_net.add_param_group({'params': self.parameters_tensor.values()})
+
         net_name = 'tnet' if self.model_embed_type == 'none' else 'enet'
 
         if self.init_round:
@@ -308,12 +316,6 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
                                     f'optimizer_{"hnet"}_round_{self.init_round}.pth')
                 if os.path.exists(path):
                     self.optimizer_hnet.load_state_dict(torch.load(path, map_location=self.server_device))
-
-        if self.model_embed_type != 'none':
-            self.parameters_tensor = {
-                k: torch.nn.Parameter(v) for k, v in state_dicts[net_name].items()
-            }
-            self.optimizer_net.add_param_group({'params': self.parameters_tensor.values()})
 
         parameters = ndarrays_to_parameters(state_dicts_to_ndarrays({net_name: state_dicts[net_name]}))
         return parameters
@@ -514,7 +516,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             ((tnet_state_dict[k].detach() - tnet_state_dict_4[k]) * tnet_state_dict[k]).sum()
             for k in tnet_state_dict.keys()
         ]).sum()
-        metrics = {**metrics, 'loss_h': float(loss)}
+        metrics = {**metrics, 'loss_h': loss.item()}
 
         grads = torch.autograd.grad(loss, [embedding] + list(self.hnet.parameters()))
 
@@ -730,6 +732,7 @@ def make_server(args: argparse.Namespace):
         model_hyper_hid_layers=args.model_hyper_hid_layers,
         model_hyper_hid_dim=args.model_hyper_hid_dim,
         model_target_type=args.model_target_type,
+        model_target_head_layers=args.model_target_head_layers,
         client_optimizer_target_lr=args.client_optimizer_target_lr,
         client_optimizer_target_momentum=args.client_optimizer_target_momentum,
         client_optimizer_target_weight_decay=args.client_optimizer_target_weight_decay,

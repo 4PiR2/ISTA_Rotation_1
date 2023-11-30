@@ -45,6 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--model-hyper-hid-layers', type=int, default=3, help='num. hidden layers hypernetwork')
     parser.add_argument('--model-hyper-hid-dim', type=int, default=100, help='hypernet hidden dim')
     parser.add_argument('--model-target-type', type=str, default='cnn', choices=['cnn', 'head'], help='target type')
+    parser.add_argument('--model-target-head-layers', type=int, default=2, help='target head num layers')
 
     ##################################
     #       Train Eval args        #

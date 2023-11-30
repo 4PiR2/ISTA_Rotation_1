@@ -72,21 +72,22 @@ class FlowerClient(flwr.client.NumPyClient):
         if embed_dim == -1:
             embed_dim = 1 + num_users // 4  # auto embedding size
         embed_y = config['client_model_embed_y'] and model_target_type != 'head'
+        model_target_head_layers = config['model_target_head_layers'] if 'model_target_head_layers' in config else 0
         device = torch.device('cpu')
 
         match data_name, model_target_type:
             case 'cifar10', 'cnn':
                 self.tnet = CNNTarget(in_channels=3, n_kernels=n_kernels, out_dim=10)
             case 'cifar10', 'head':
-                self.tnet = HeadTarget(in_dim=embed_dim, hidden_dim=embed_dim, out_dim=10, n_layers=3)
+                self.tnet = HeadTarget(in_dim=embed_dim, hidden_dim=embed_dim, out_dim=10, n_layers=model_target_head_layers)
             case 'cifar100', 'cnn':
                 self.tnet = CNNTarget(in_channels=3, n_kernels=n_kernels, out_dim=100)
             case 'cifar100', 'head':
-                self.tnet = HeadTarget(in_dim=embed_dim, hidden_dim=embed_dim, out_dim=100, n_layers=3)
+                self.tnet = HeadTarget(in_dim=embed_dim, hidden_dim=embed_dim, out_dim=100, n_layers=model_target_head_layers)
             case 'femnist', 'cnn':
                 self.tnet = CNNTarget(in_channels=1, n_kernels=n_kernels, out_dim=62)
             case 'femnist', 'head':
-                self.tnet = HeadTarget(in_dim=embed_dim, hidden_dim=embed_dim, out_dim=62, n_layers=3)
+                self.tnet = HeadTarget(in_dim=embed_dim, hidden_dim=embed_dim, out_dim=62, n_layers=model_target_head_layers)
             case _:
                 raise ValueError("Choose data_name from ['cifar10', 'cifar100', 'femnist'].")
         # log(INFO, f'num_parameters_tnet: {count_parameters(self.tnet)}')
@@ -207,6 +208,7 @@ class FlowerClient(flwr.client.NumPyClient):
 
         cid = int(config['cid'])
         is_eval = config['is_eval']
+        model_target_type = config['model_target_type']
 
         if not is_eval:
             dataloader = self.get_dataloader(is_eval, cid)  # self.train_loaders[cid]
@@ -241,20 +243,21 @@ class FlowerClient(flwr.client.NumPyClient):
             with torch.no_grad():
                 embeddings = self.enet((image_all, label_all))
 
-        model_target_type = config['model_target_type']
+        metrics = {}
         if not is_eval and model_target_type == 'head':
             x = (embeddings[:, None, None, :] @ embeddings[None, :, :, None])[:, :, 0, 0]
             y = (label_all[:, None, None, :] @ label_all[None, :, :, None])[:, :, 0, 0]
             sig_x = x.sigmoid()
             loss_1 = (- sig_x[y > .5].log().sum() - (1. - sig_x[y < .5]).log().sum()) / sig_x.numel()
             self.stage_memory['loss_1'] = loss_1
+            metrics['loss_1'] = loss_1.item()
 
         embedding = embeddings.mean(dim=0)
         embedding_ndarray = embedding.detach().cpu().numpy()
         label_count = label_all.sum(dim=0)
         self.stage_memory['embedding'] = embedding
         self.stage_memory['label_count'] = label_count
-        return [embedding_ndarray], 1, {}
+        return [embedding_ndarray], 1, metrics
 
     def fit_2(self, parameters: List[np.ndarray], config: Config) -> Tuple[NDArrays, int, Dict[str, Scalar]]:
         device = torch.device(config['device'])
@@ -329,10 +332,17 @@ class FlowerClient(flwr.client.NumPyClient):
         total_loss /= length
         total_correct /= length
 
+        metrics = {
+            'loss_t': float(total_loss),
+            'accuracy': float(total_correct),
+        }
+
         if model_target_type == 'head' and not is_eval:
-            self.stage_memory['loss_2'] = torch.stack(
+            loss_2 = torch.stack(
                 [criterion(self.tnet(inputs), labels.to(device)) for inputs, labels in dataloader], dim=0,
             ).mean()
+            self.stage_memory['loss_2'] = loss_2
+            metrics['loss_2'] = loss_2.item()
 
         if not is_eval:
             parameters = self.get_parameters({'net_name': 'tnet'})
@@ -340,28 +350,24 @@ class FlowerClient(flwr.client.NumPyClient):
             parameters = []
 
         # gc.collect()
-        return parameters, length, {
-            'loss_t': float(total_loss),
-            'accuracy': float(total_correct),
-        }
+        return parameters, length, metrics
 
     def fit_3(self, parameters: List[np.ndarray], config: Config) -> Tuple[NDArrays, int, Dict[str, Scalar]]:
         embedding = self.stage_memory['embedding']
         embed_grad = torch.tensor(parameters[0], device=embedding.device)
         loss = (embed_grad * embedding).sum()
+        metrics = {'loss_e': loss.item()}
         if 'loss_1' in self.stage_memory:
-            loss += self.stage_memory['loss_1']
+            loss += self.stage_memory['loss_1'] * 0.
         if 'loss_2' in self.stage_memory:
-            loss += self.stage_memory['loss_2']
+            loss += self.stage_memory['loss_2'] * 0.
         for p in self.enet.parameters():
             p.grad = None
         loss.backward()
         torch.nn.utils.clip_grad_norm_(list(self.enet.parameters()), 50.)
         grad_dict = {k: v.grad for k, v in zip(self.enet.state_dict().keys(), self.enet.parameters())}
         grads = state_dicts_to_ndarrays({'enet': grad_dict})
-        return grads, 1, {
-            'loss_e': float(loss),
-        }
+        return grads, 1, metrics
 
     def evaluate(self, parameters: List[np.ndarray], config: Config) -> Tuple[float, int, Dict[str, Scalar]]:
         """Evaluate the network on the entire test set."""
