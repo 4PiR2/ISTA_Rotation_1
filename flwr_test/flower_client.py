@@ -284,7 +284,7 @@ class FlowerClient(flwr.client.NumPyClient):
 
         if not is_eval:
             self.tnet.train()
-            optimizer_target_lr = config['client_optimizer_target_lr'] if not gradient_mode else 1.
+            optimizer_target_lr = config['client_optimizer_target_lr']  # if not gradient_mode else 1.
             optimizer_target_momentum = config['client_optimizer_target_momentum'] if not gradient_mode else 0.
             optimizer_target_weight_decay = config['client_optimizer_target_weight_decay']  # if not grad_mode else 0.
             optimizer = torch.optim.SGD(
@@ -371,18 +371,27 @@ class FlowerClient(flwr.client.NumPyClient):
             if not is_eval:
                 length = num_batches * dataloader.batch_size
                 sample_counts = torch.zeros(len(losses), device=device)
-                for _ in range(num_batches // len(dataloader)):
-                    samples = torch.ones(len(losses), device=device).multinomial(
-                        num_samples=dataloader.batch_size * len(dataloader),
-                        replacement=False,
-                    )
-                    sample_counts[samples] += 1.
-                if num_batches % len(dataloader) > 0:
-                    samples = torch.ones(len(losses), device=device).multinomial(
-                        num_samples=dataloader.batch_size * (num_batches % len(dataloader)),
-                        replacement=False,
-                    )
-                sample_counts[samples] += 1.
+
+                # for _ in range(num_batches // len(dataloader)):
+                #     samples = torch.ones(len(losses), device=device).multinomial(
+                #         num_samples=dataloader.batch_size * len(dataloader),
+                #         replacement=False,
+                #     )
+                #     sample_counts[samples] += 1.
+                # if num_batches % len(dataloader) > 0:
+                #     samples = torch.ones(len(losses), device=device).multinomial(
+                #         num_samples=dataloader.batch_size * (num_batches % len(dataloader)),
+                #         replacement=False,
+                #     )
+                # sample_counts[samples] += 1.
+
+                samples = torch.ones(len(losses), device=device).multinomial(
+                    num_samples=length,
+                    replacement=True,
+                )
+                for sample in samples:
+                    sample_counts[sample] += 1.
+
                 loss = (losses * sample_counts).sum() / length
                 optimizer.zero_grad()
                 loss.backward()
