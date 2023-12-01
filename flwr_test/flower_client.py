@@ -370,8 +370,7 @@ class FlowerClient(flwr.client.NumPyClient):
 
             if not is_eval:
                 length = num_batches * dataloader.batch_size
-                sample_counts = torch.zeros(len(losses), device=device)
-
+                # sample_counts = torch.zeros(len(losses), device=device)
                 # for _ in range(num_batches // len(dataloader)):
                 #     samples = torch.ones(len(losses), device=device).multinomial(
                 #         num_samples=dataloader.batch_size * len(dataloader),
@@ -384,14 +383,10 @@ class FlowerClient(flwr.client.NumPyClient):
                 #         replacement=False,
                 #     )
                 # sample_counts[samples] += 1.
-
-                samples = torch.ones(len(losses), device=device).multinomial(
+                sample_counts = torch.ones(len(losses), device=device).multinomial(
                     num_samples=length,
                     replacement=True,
-                )
-                for sample in samples:
-                    sample_counts[sample] += 1.
-
+                ).bincount()
                 loss = (losses * sample_counts).sum() / length
                 optimizer.zero_grad()
                 loss.backward()
