@@ -38,14 +38,14 @@ def parse_args() -> argparse.Namespace:
     ################################
     #       Model Prop args        #
     ################################
-    parser.add_argument('--model-num-kernels', type=int, default=16, help='number of kernels for cnn model')
+    parser.add_argument('--client-model-num-kernels', type=int, default=16, help='number of kernels for cnn model')
     parser.add_argument('--model-embed-type', type=str, default='cnn', choices=['none', 'cnn', 'mlp'], help='embed with')
-    parser.add_argument('--model-embed-dim', type=int, default=-1, help='embedding dim')
+    parser.add_argument('--client-model-embed-dim', type=int, default=-1, help='embedding dim')
     parser.add_argument('--client-model-embed-y', type=str2bool, default=True, help='embed y as well as x')
     parser.add_argument('--model-hyper-hid-layers', type=int, default=3, help='num. hidden layers hypernetwork')
     parser.add_argument('--model-hyper-hid-dim', type=int, default=100, help='hypernet hidden dim')
-    parser.add_argument('--model-target-type', type=str, default='cnn', choices=['cnn', 'head'], help='target type')
-    parser.add_argument('--model-target-head-layers', type=int, default=2, help='target head num layers')
+    parser.add_argument('--client-model-target-type', type=str, default='cnn', choices=['cnn', 'head'], help='target type')
+    parser.add_argument('--client-model-target-head-layers', type=int, default=2, help='target head num layers')
 
     ##################################
     #       Train Eval args        #
@@ -53,6 +53,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--client-optimizer-target-lr', type=float, default=2e-3, help='learning rate for inner optimizer')
     parser.add_argument('--client-optimizer-target-momentum', type=float, default=.9)
     parser.add_argument('--client-optimizer-target-weight-decay', type=float, default=5e-5, help='inner weight decay')
+    parser.add_argument('--client-target-gradient-mode', type=str2bool, default=False, help='use gradient mode instead of inner optimization')
     parser.add_argument('--client-target-num-batches', type=int, default=50, help='number of inner steps')
     parser.add_argument('--optimizer-embed-type', type=str, default='adam', choices=['adam', 'sgd'], help='learning rate')
     parser.add_argument('--optimizer-embed-lr', type=float, default=2e-4, help='embedding learning rate')
@@ -61,7 +62,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--optimizer-hyper-type', type=str, default='adam', choices=['adam', 'sgd'], help='learning rate')
     parser.add_argument('--optimizer-hyper-lr', type=float, default=2e-4, help='learning rate')
     parser.add_argument('--optimizer-hyper-weight-decay', type=float, default=1e-3, help='weight decay')
-    parser.add_argument('--client-eval-mask-absent', type=str2bool, default=True, help='mask absent classes at eval')
+    # parser.add_argument('--client-eval-mask-absent', type=str2bool, default=True, help='mask absent classes at eval')
     parser.add_argument('--client-eval-embed-train-split', type=bool, default=True, help='use train or test data to embed')
 
     args = parser.parse_args()

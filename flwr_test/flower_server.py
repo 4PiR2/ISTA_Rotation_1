@@ -63,17 +63,18 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             client_dataset_partition_type: str = 'by_class',
             client_dataset_alpha_train: float = .1,
             client_dataset_alpha_test: float = .1,
-            model_num_kernels: int = 16,
+            client_model_num_kernels: int = 16,
             model_embed_type: str = 'none',
-            model_embed_dim: int = -1,
+            client_model_embed_dim: int = -1,
             client_model_embed_model_y: bool = True,
             model_hyper_hid_layers: int = 3,
             model_hyper_hid_dim: int = 100,
-            model_target_type: str = 'cnn',
-            model_target_head_layers: int = 2,
+            client_model_target_type: str = 'cnn',
+            client_model_target_head_layers: int = 2,
             client_optimizer_target_lr: float = 2e-3,
             client_optimizer_target_momentum: float = .9,
             client_optimizer_target_weight_decay: float = 5e-5,
+            client_target_gradient_mode: bool = False,
             client_target_num_batches: int = 50,
             optimizer_embed_type: str = 'adam',
             optimizer_embed_lr: float = 2e-4,
@@ -82,7 +83,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             optimizer_hyper_type: str = 'adam',
             optimizer_hyper_lr: float = 2e-4,
             optimizer_hyper_weight_decay: float = 1e-3,
-            client_eval_mask_absent: bool = False,
+            # client_eval_mask_absent: bool = False,
             client_eval_embed_train_split: bool = True,
     ):
         set_seed(server_seed)
@@ -141,20 +142,21 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
         self.client_dataset_partition_type: str = client_dataset_partition_type
         self.client_dataset_alpha_train: float = client_dataset_alpha_train
         self.client_dataset_alpha_test: float = client_dataset_alpha_test
-        self.model_num_kernels: int = model_num_kernels
+        self.client_model_num_kernels: int = client_model_num_kernels
         self.model_embed_type: str = model_embed_type
-        self.model_embed_dim: int = model_embed_dim
+        self.client_model_embed_dim: int = client_model_embed_dim
         self.client_model_embed_y: bool = client_model_embed_model_y
         self.model_hyper_hid_layers: int = model_hyper_hid_layers
         self.model_hyper_hid_dim: int = model_hyper_hid_dim
-        self.model_target_type: str = model_target_type
-        self.model_target_head_layers: int = model_target_head_layers
+        self.client_model_target_type: str = client_model_target_type
+        self.client_model_target_head_layers: int = client_model_target_head_layers
         self.client_optimizer_target_lr: float = client_optimizer_target_lr
         self.client_optimizer_target_momentum: float = client_optimizer_target_momentum
         self.client_optimizer_target_weight_decay: float = client_optimizer_target_weight_decay
+        self.client_target_gradient_mode: bool = client_target_gradient_mode
         self.client_target_num_batches: int = client_target_num_batches
         self.client_embed_num_batches: int = client_embed_num_batches
-        self.client_eval_mask_absent: bool = client_eval_mask_absent
+        # self.client_eval_mask_absent: bool = client_eval_mask_absent
         self.client_eval_embed_train_split: bool = client_eval_embed_train_split
         self.server_device: torch.device = torch.device(f'cuda:{torch.cuda.device_count() - 1}') \
             if torch.cuda.is_available() else torch.device('cpu')
@@ -247,12 +249,12 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             'client_dataset_partition_type': self.client_dataset_partition_type,
             'client_dataset_alpha_train': self.client_dataset_alpha_train,
             'client_dataset_alpha_test': self.client_dataset_alpha_test,
-            'model_num_kernels': self.model_num_kernels,
+            'client_model_num_kernels': self.client_model_num_kernels,
             'model_embed_type': self.model_embed_type,
-            'model_embed_dim': self.model_embed_dim,
+            'client_model_embed_dim': self.client_model_embed_dim,
             'client_model_embed_y': self.client_model_embed_y,
-            'model_target_type': self.model_target_type,
-            'model_target_head_layers': self.model_target_head_layers,
+            'client_model_target_type': self.client_model_target_type,
+            'client_model_target_head_layers': self.client_model_target_head_layers,
         }
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             submitted_fs = {
@@ -481,7 +483,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             'stage': 3,
             'is_eval': False,
             'client_embed_num_batches': self.client_embed_num_batches,
-            'model_target_type': self.model_target_type,
+            'client_model_target_type': self.client_model_target_type,
         }), timeout=None)
         time_3s_start = timeit.default_timer()
         assert res.status.code == Code.OK
@@ -500,11 +502,12 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             'device': device,
             'stage': 4,
             'is_eval': False,
+            'client_target_gradient_mode': self.client_target_gradient_mode,
             'client_optimizer_target_lr': self.client_optimizer_target_lr,
             'client_optimizer_target_momentum': self.client_optimizer_target_momentum,
             'client_optimizer_target_weight_decay': self.client_optimizer_target_weight_decay,
             'client_target_num_batches': self.client_target_num_batches,
-            'model_target_type': self.model_target_type,
+            'client_model_target_type': self.client_model_target_type,
         }), timeout=None)
         time_4s_start = timeit.default_timer()
         assert res.status.code == Code.OK
@@ -563,11 +566,12 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             'device': device,
             'stage': 1,
             'is_eval': False,
+            'client_target_gradient_mode': self.client_target_gradient_mode,
             'client_optimizer_target_lr': self.client_optimizer_target_lr,
             'client_optimizer_target_momentum': self.client_optimizer_target_momentum,
             'client_optimizer_target_weight_decay': self.client_optimizer_target_weight_decay,
             'client_target_num_batches': self.client_target_num_batches,
-            'model_target_type': self.model_target_type,
+            'client_model_target_type': self.client_model_target_type,
         }), timeout=None)
         time_1s_start = timeit.default_timer()
         assert res.status.code == Code.OK
@@ -640,7 +644,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             'stage': 6,
             'is_eval': True + self.eval_test,
             'client_eval_embed_train_split': self.client_eval_embed_train_split,
-            'model_target_type': self.model_target_type,
+            'client_model_target_type': self.client_model_target_type,
         }), timeout=None)
         time_6s_start = timeit.default_timer()
         assert res.status.code == Code.OK
@@ -660,8 +664,9 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             'device': device,
             'stage': 7,
             'is_eval': True + self.eval_test,
-            'client_eval_mask_absent': self.client_eval_mask_absent,
-            'model_target_type': self.model_target_type,
+            'client_target_gradient_mode': self.client_target_gradient_mode,
+            # 'client_eval_mask_absent': self.client_eval_mask_absent,
+            'client_model_target_type': self.client_model_target_type,
         }), timeout=None)
         time_7s_start = timeit.default_timer()
         assert res.status.code == Code.OK
@@ -690,7 +695,8 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             'device': device,
             'stage': 2,
             'is_eval': True + self.eval_test,
-            'model_target_type': self.model_target_type,
+            'client_target_gradient_mode': self.client_target_gradient_mode,
+            'client_model_target_type': self.client_model_target_type,
         }), timeout=None)
         time_2s_start = timeit.default_timer()
         assert res.status.code == Code.OK
@@ -725,17 +731,18 @@ def make_server(args: argparse.Namespace):
         client_dataset_partition_type=args.client_dataset_partition_type,
         client_dataset_alpha_train=args.client_dataset_alpha_train,
         client_dataset_alpha_test=args.client_dataset_alpha_test,
-        model_num_kernels=args.model_num_kernels,
+        client_model_num_kernels=args.client_model_num_kernels,
         model_embed_type=args.model_embed_type,
-        model_embed_dim=args.model_embed_dim,
+        client_model_embed_dim=args.client_model_embed_dim,
         client_model_embed_model_y=args.client_model_embed_y,
         model_hyper_hid_layers=args.model_hyper_hid_layers,
         model_hyper_hid_dim=args.model_hyper_hid_dim,
-        model_target_type=args.model_target_type,
-        model_target_head_layers=args.model_target_head_layers,
+        client_model_target_type=args.client_model_target_type,
+        client_model_target_head_layers=args.client_model_target_head_layers,
         client_optimizer_target_lr=args.client_optimizer_target_lr,
         client_optimizer_target_momentum=args.client_optimizer_target_momentum,
         client_optimizer_target_weight_decay=args.client_optimizer_target_weight_decay,
+        client_target_gradient_mode=args.client_target_gradient_mode,
         client_target_num_batches=args.client_target_num_batches,
         optimizer_embed_type=args.optimizer_embed_type,
         optimizer_embed_lr=args.optimizer_embed_lr,
@@ -744,7 +751,7 @@ def make_server(args: argparse.Namespace):
         optimizer_hyper_type=args.optimizer_hyper_type,
         optimizer_hyper_lr=args.optimizer_hyper_lr,
         optimizer_hyper_weight_decay=args.optimizer_hyper_weight_decay,
-        client_eval_mask_absent=args.client_eval_mask_absent,
+        # client_eval_mask_absent=args.client_eval_mask_absent,
         client_eval_embed_train_split=args.client_eval_embed_train_split,
     )
 

@@ -67,14 +67,14 @@ class FlowerClient(flwr.client.NumPyClient):
             embedding_dir_path=embedding_dir_path,
         )
 
-        n_kernels = config['model_num_kernels']
-        model_target_type = config['model_target_type']
+        n_kernels = config['client_model_num_kernels']
+        model_target_type = config['client_model_target_type']
         model_embed_type = config['model_embed_type']
-        embed_dim = config['model_embed_dim']
+        embed_dim = config['client_model_embed_dim']
         if embed_dim == -1:
             embed_dim = 1 + num_users // 4  # auto embedding size
         embed_y = config['client_model_embed_y'] and model_target_type != 'head'
-        model_target_head_layers = config['model_target_head_layers'] if 'model_target_head_layers' in config else 0
+        model_target_head_layers = config['client_model_target_head_layers']
         device = torch.device('cpu')
 
         match data_name, model_target_type:
@@ -210,7 +210,7 @@ class FlowerClient(flwr.client.NumPyClient):
 
         cid = int(config['cid'])
         is_eval = config['is_eval']
-        model_target_type = config['model_target_type']
+        model_target_type = config['client_model_target_type']
 
         if not is_eval:
             dataloader = self.get_dataloader(is_eval, cid)  # self.train_loaders[cid]
@@ -268,9 +268,9 @@ class FlowerClient(flwr.client.NumPyClient):
 
         cid = int(config['cid'])
         is_eval = config['is_eval']
-        is_grad_mode = True  # TODO
-        model_target_type = config['model_target_type']
-        criterion = torch.nn.CrossEntropyLoss(reduction='mean' if not is_grad_mode else 'none')
+        gradient_mode = config['client_target_gradient_mode']
+        model_target_type = config['client_model_target_type']
+        criterion = torch.nn.CrossEntropyLoss(reduction='mean' if not gradient_mode else 'none')
         classes_present = self.stage_memory['label_count'].bool().log()
         metrics = {}
 
@@ -284,8 +284,8 @@ class FlowerClient(flwr.client.NumPyClient):
 
         if not is_eval:
             self.tnet.train()
-            optimizer_target_lr = config['client_optimizer_target_lr'] if not is_grad_mode else 1.
-            optimizer_target_momentum = config['client_optimizer_target_momentum'] if not is_grad_mode else 0.
+            optimizer_target_lr = config['client_optimizer_target_lr'] if not gradient_mode else 1.
+            optimizer_target_momentum = config['client_optimizer_target_momentum'] if not gradient_mode else 0.
             optimizer_target_weight_decay = config['client_optimizer_target_weight_decay']  # if not grad_mode else 0.
             optimizer = torch.optim.SGD(
                 self.tnet.parameters(),
@@ -298,7 +298,7 @@ class FlowerClient(flwr.client.NumPyClient):
             self.tnet.eval()
             num_batches = len(dataloader)
 
-        if not is_grad_mode:
+        if not gradient_mode:
             i, length, total_loss, total_correct, total_correct_masked = 0, 0, 0., 0., 0.
             while i < num_batches:
                 for inputs, labels in dataloader:

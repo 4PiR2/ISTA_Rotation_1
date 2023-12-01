@@ -38,9 +38,9 @@ def main():
             'client_dataset_partition_type': server.strategy.client_data_partition_type,
             'client_dataset_alpha_train': server.strategy.client_dataset_alpha_train,
             'client_dataset_alpha_test': server.strategy.client_dataset_alpha_test,
-            'model_num_kernels': server.strategy.model_num_kernels,
+            'client_model_num_kernels': server.strategy.client_model_num_kernels,
             'model_embed_type': server.strategy.model_embed_type,
-            'model_embed_dim': server.strategy.model_embed_dim,
+            'client_model_embed_dim': server.strategy.client_model_embed_dim,
             'client_model_embed_y': server.strategy.client_model_embed_y,
         }
 
