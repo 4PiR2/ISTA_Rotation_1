@@ -1,5 +1,5 @@
 import gc
-from logging import DEBUG, INFO
+from logging import DEBUG, INFO, WARNING
 import os
 import time
 import timeit
@@ -46,6 +46,8 @@ class FlowerClient(flwr.client.NumPyClient):
         alpha_train = config['client_dataset_alpha_train']
         alpha_test = config['client_dataset_alpha_test']
         embedding_dir_path = None
+
+        assert data_name == 'femnist' or num_train_users == int(num_users * .9)
 
         # Infer on range of OOD test clients
         if alpha_test == -1.:
@@ -215,32 +217,28 @@ class FlowerClient(flwr.client.NumPyClient):
         if not is_eval:
             dataloader = self.get_dataloader(is_eval, cid)  # self.train_loaders[cid]
             num_batches = config['client_embed_num_batches']
+            num_batches = num_batches if num_batches != -1 else len(dataloader)
+            image_all, label_all = [], []
+            i = 0
+            while i < num_batches:
+                for images, labels in dataloader:
+                    if i >= num_batches:
+                        break
+                    i += 1
+                    images, labels = images.to(device), labels.to(device)
+                    image_all.append(images)
+                    label_all.append(labels)
+            image_all = torch.cat(image_all, dim=0)
+            label_all = torch.cat(label_all, dim=0)
+            self.enet.train()
+            embeddings = self.enet((image_all, label_all))
         else:
             if config['client_eval_embed_train_split']:
                 dataloader = self.get_dataloader(0, cid)  # self.train_loaders[cid]
             else:
-                # self.val_loaders[cid] or self.test_loaders[cid]
-                dataloader = self.get_dataloader(is_eval, cid)
-            num_batches = -1
-
-        num_batches = num_batches if num_batches != -1 else len(dataloader)
-        image_all, label_all = [], []
-        i = 0
-        while i < num_batches:
-            for images, labels in dataloader:
-                if i >= num_batches:
-                    break
-                i += 1
-                images, labels = images.to(device), labels.to(device)
-                image_all.append(images)
-                label_all.append(labels)
-        image_all = torch.cat(image_all, dim=0)
-        label_all = torch.cat(label_all, dim=0)
-
-        if not is_eval:
-            self.enet.train()
-            embeddings = self.enet((image_all, label_all))
-        else:
+                dataloader = self.get_dataloader(is_eval, cid) # self.val_loaders[cid] or self.test_loaders[cid]
+            image_all, label_all = dataloader.dataset.tensors
+            image_all, label_all = image_all.to(device), label_all.to(device)
             self.enet.eval()
             with torch.no_grad():
                 embeddings = self.enet((image_all, label_all))
@@ -365,15 +363,17 @@ class FlowerClient(flwr.client.NumPyClient):
             losses = criterion(outputs, labels)
 
             if not is_eval:
-                length = num_batches * dataloader.batch_size
-
-                # sample_counts = torch.ones(len(losses), device=device).multinomial(
-                #     num_samples=length,
-                #     replacement=True,
-                # ).bincount(minlength=len(losses))
-                # loss = (losses * sample_counts).sum() / length
-
-                loss = losses.mean()
+                do_sample = False
+                if do_sample:
+                    length = num_batches * dataloader.batch_size
+                    sample_counts = torch.ones(len(losses), device=device).multinomial(
+                        num_samples=length,
+                        replacement=True,
+                    ).bincount(minlength=len(losses))
+                    loss = (losses * sample_counts).sum() / length
+                else:
+                    length = len(losses)
+                    loss = losses.mean()
 
                 optimizer.zero_grad()
                 loss.backward()

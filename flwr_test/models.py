@@ -51,7 +51,7 @@ class CNNEmbed2(nn.Module):
             c = y[..., None, None].expand(*((-1,) * (y.dim() - 1)), -1, *x.shape[-2:])
             x = torch.cat((x, c), dim=-3)
         x = self.layers(x)
-        return x
+        return x * 16.
 
 
 class Hyper(nn.Module):
