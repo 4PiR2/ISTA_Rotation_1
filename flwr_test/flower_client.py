@@ -268,8 +268,11 @@ class FlowerClient(flwr.client.NumPyClient):
 
         cid = int(config['cid'])
         is_eval = config['is_eval']
+        is_grad_mode = True  # TODO
         model_target_type = config['model_target_type']
-        criterion = torch.nn.CrossEntropyLoss()
+        criterion = torch.nn.CrossEntropyLoss(reduction='mean' if not is_grad_mode else 'none')
+        classes_present = self.stage_memory['label_count'].bool().log()
+        metrics = {}
 
         match model_target_type:
             case 'cnn':
@@ -281,70 +284,128 @@ class FlowerClient(flwr.client.NumPyClient):
 
         if not is_eval:
             self.tnet.train()
+            optimizer_target_lr = config['client_optimizer_target_lr'] if not is_grad_mode else 1.
+            optimizer_target_momentum = config['client_optimizer_target_momentum'] if not is_grad_mode else 0.
+            optimizer_target_weight_decay = config['client_optimizer_target_weight_decay']  # if not grad_mode else 0.
             optimizer = torch.optim.SGD(
                 self.tnet.parameters(),
-                lr=config['client_optimizer_target_lr'],
-                momentum=config['client_optimizer_target_momentum'],
-                weight_decay=config['client_optimizer_target_weight_decay']
+                lr=optimizer_target_lr,
+                momentum=optimizer_target_momentum,
+                weight_decay=optimizer_target_weight_decay,
             )
             num_batches = config['client_target_num_batches']
         else:
             self.tnet.eval()
             num_batches = len(dataloader)
 
-        if is_eval and 'client_eval_mask_absent' in config and config['client_eval_mask_absent']:
-            classes_present = self.stage_memory['label_count'].bool().log()
-        else:
-            classes_present = 0.
+        if not is_grad_mode:
+            i, length, total_loss, total_correct, total_correct_masked = 0, 0, 0., 0., 0.
+            while i < num_batches:
+                for inputs, labels in dataloader:
+                    if i >= num_batches:
+                        break
+                    i += 1
+                    length += len(labels)
 
-        i, length, total_loss, total_correct = 0, 0, 0., 0.
-        while i < num_batches:
-            for inputs, labels in dataloader:
-                if i >= num_batches:
-                    break
-                i += 1
-                length += len(labels)
-
-                match model_target_type, is_eval:
-                    case 'head', 0:
-                        outputs = self.tnet(inputs.detach())
-                    case 'head', _:
-                        with torch.no_grad():
-                            outputs = self.tnet(inputs)
-                    case _, 0:
-                        outputs = self.tnet(inputs.to(device))
-                    case _, _:
-                        with torch.no_grad():
+                    match model_target_type, is_eval:
+                        case 'head', 0:
+                            outputs = self.tnet(inputs.detach())
+                        case 'head', _:
+                            with torch.no_grad():
+                                outputs = self.tnet(inputs)
+                        case _, 0:
                             outputs = self.tnet(inputs.to(device))
+                        case _, _:
+                            with torch.no_grad():
+                                outputs = self.tnet(inputs.to(device))
 
-                labels = labels.to(device)
-                loss = criterion(outputs, labels)
-                if not is_eval:
-                    optimizer.zero_grad()
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(self.tnet.parameters(), 50.)
-                    optimizer.step()
-                # Metrics
-                total_loss += loss.item() * len(labels)
-                predicts = (outputs + classes_present).argmax(dim=-1)
-                if labels.dim() > 1:
-                    labels = labels.argmax(dim=-1)
-                total_correct += (predicts == labels).sum().item()
+                    labels = labels.to(device)
+                    loss = criterion(outputs, labels)
+                    if not is_eval:
+                        optimizer.zero_grad()
+                        loss.backward()
+                        torch.nn.utils.clip_grad_norm_(self.tnet.parameters(), 50.)
+                        optimizer.step()
+                    # Metrics
+                    total_loss += loss.item() * len(labels)
+                    if labels.dim() > 1:
+                        labels = labels.argmax(dim=-1)
+                    predicts = outputs.argmax(dim=-1)
+                    predicts_masked = (outputs + classes_present).argmax(dim=-1)
+                    total_correct += (predicts == labels).sum().item()
+                    total_correct_masked += (predicts_masked == labels).sum().item()
 
-        total_loss /= length
-        total_correct /= length
+            total_loss /= length
+            total_correct /= length
+            total_correct_masked /= length
+
+            if model_target_type == 'head' and not is_eval:
+                loss_2 = torch.stack(
+                    [criterion(self.tnet(inputs), labels.to(device)) for inputs, labels in dataloader], dim=0,
+                ).mean()
+                self.stage_memory['loss_2'] = loss_2
+                metrics['loss_2'] = loss_2.item()
+
+        else:
+            xs, ys = [], []
+            for x, y in dataloader.dataset:
+                xs.append(x.to(device))
+                ys.append(y.to(device))
+            inputs = torch.stack(xs, dim=0)
+            labels = torch.stack(ys, dim=0)
+
+            match model_target_type, is_eval:
+                case 'head', 0:
+                    outputs = self.tnet(inputs.detach())
+                case 'head', _:
+                    with torch.no_grad():
+                        outputs = self.tnet(inputs)
+                case _, 0:
+                    outputs = self.tnet(inputs)
+                case _, _:
+                    with torch.no_grad():
+                        outputs = self.tnet(inputs)
+
+            losses = criterion(outputs, labels)
+
+            if not is_eval:
+                length = num_batches * dataloader.batch_size
+                sample_counts = torch.zeros(len(losses), device=device)
+                for _ in range(num_batches // len(dataloader)):
+                    samples = torch.ones(len(losses), device=device).multinomial(
+                        num_samples=dataloader.batch_size * len(dataloader),
+                        replacement=False,
+                    )
+                    sample_counts[samples] += 1.
+                samples = torch.ones(len(losses), device=device).multinomial(
+                    num_samples=dataloader.batch_size * (num_batches % len(dataloader)),
+                    replacement=False,
+                )
+                sample_counts[samples] += 1.
+                loss = (losses * sample_counts).sum() / length
+                optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.tnet.parameters(), 50.)
+                optimizer.step()
+            else:
+                length = len(losses)
+                loss = losses.mean()
+
+            # Metrics
+            total_loss = loss.item()
+            if labels.dim() > 1:
+                labels = labels.argmax(dim=-1)
+            predicts = outputs.argmax(dim=-1)
+            predicts_masked = (outputs + classes_present).argmax(dim=-1)
+            total_correct = (predicts == labels).mean(dtype=outputs.dtype).item()
+            total_correct_masked = (predicts_masked == labels).mean(dtype=outputs.dtype).item()
 
         metrics = {
+            **metrics,
             'loss_t': float(total_loss),
             'accuracy': float(total_correct),
+            'accuracy_m': float(total_correct_masked),
         }
-
-        if model_target_type == 'head' and not is_eval:
-            loss_2 = torch.stack(
-                [criterion(self.tnet(inputs), labels.to(device)) for inputs, labels in dataloader], dim=0,
-            ).mean()
-            self.stage_memory['loss_2'] = loss_2
-            metrics['loss_2'] = loss_2.item()
 
         if not is_eval:
             parameters = self.get_parameters({'net_name': 'tnet'})
