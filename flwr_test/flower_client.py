@@ -285,7 +285,7 @@ class FlowerClient(flwr.client.NumPyClient):
         if not is_eval:
             self.tnet.train()
             optimizer_target_lr = config['client_optimizer_target_lr']  # if not gradient_mode else 1.
-            optimizer_target_momentum = config['client_optimizer_target_momentum'] if not gradient_mode else 0.
+            optimizer_target_momentum = config['client_optimizer_target_momentum']  # if not gradient_mode else 0.
             optimizer_target_weight_decay = config['client_optimizer_target_weight_decay']  # if not grad_mode else 0.
             optimizer = torch.optim.SGD(
                 self.tnet.parameters(),
@@ -347,12 +347,8 @@ class FlowerClient(flwr.client.NumPyClient):
                 metrics['loss_2'] = loss_2.item()
 
         else:
-            xs, ys = [], []
-            for x, y in dataloader.dataset:
-                xs.append(x.to(device))
-                ys.append(y.to(device))
-            inputs = torch.stack(xs, dim=0)
-            labels = torch.stack(ys, dim=0)
+            inputs, labels = dataloader.dataset.tensors
+            inputs, labels = inputs.to(device), labels.to(device)
 
             match model_target_type, is_eval:
                 case 'head', 0:
@@ -370,11 +366,15 @@ class FlowerClient(flwr.client.NumPyClient):
 
             if not is_eval:
                 length = num_batches * dataloader.batch_size
-                sample_counts = torch.ones(len(losses), device=device).multinomial(
-                    num_samples=length,
-                    replacement=True,
-                ).bincount(minlength=len(losses))
-                loss = (losses * sample_counts).sum() / length
+
+                # sample_counts = torch.ones(len(losses), device=device).multinomial(
+                #     num_samples=length,
+                #     replacement=True,
+                # ).bincount(minlength=len(losses))
+                # loss = (losses * sample_counts).sum() / length
+
+                loss = losses.mean()
+
                 optimizer.zero_grad()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.tnet.parameters(), 50.)
