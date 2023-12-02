@@ -50,8 +50,9 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             num_train_clients: int,
             num_step_clients: int,
             init_round: int = 0,
-            eval_interval: int = 10,
+            eval_interval: int = 100,
             eval_test: bool = False,
+            save_interval: int = 1000,
             log_dir: str = './outputs',
             experiment_name: Optional[str] = None,
             server_seed: int = 42,
@@ -72,17 +73,19 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             client_model_target_type: str = 'cnn',
             client_model_target_head_layers: int = 2,
             client_optimizer_target_lr: float = 2e-3,
-            client_optimizer_target_momentum: float = .9,
             client_optimizer_target_weight_decay: float = 5e-5,
+            client_optimizer_target_momentum: float = .9,
             client_target_gradient_mode: bool = False,
             client_target_num_batches: int = 50,
             optimizer_embed_type: str = 'adam',
             optimizer_embed_lr: float = 2e-4,
             optimizer_embed_weight_decay: float = 1e-3,
+            optimizer_embed_momentum: float = .9,
             client_embed_num_batches: int = 1,
             optimizer_hyper_type: str = 'adam',
             optimizer_hyper_lr: float = 2e-4,
             optimizer_hyper_weight_decay: float = 1e-3,
+            optimizer_hyper_momentum: float = .9,
             # client_eval_mask_absent: bool = False,
             client_eval_embed_train_split: bool = True,
     ):
@@ -132,6 +135,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
         self.init_round: int = init_round
         self.eval_interval: int = eval_interval
         self.eval_test: bool = eval_test
+        self.save_interval: int = save_interval
         self.log_dir: str = log_dir
         self.experiment_name: str = experiment_name if experiment_name is not None else ''
         self.client_dataset_seed: int = client_dataset_seed
@@ -180,7 +184,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
                     self.optimizer_hnet: Optional[torch.optim.Optimizer] = torch.optim.SGD(
                         params=[torch.nn.Parameter(torch.empty(0, device=self.server_device))],
                         lr=optimizer_hyper_lr,
-                        momentum=.9,
+                        momentum=optimizer_hyper_momentum,
                         weight_decay=optimizer_hyper_weight_decay,
                     )
                 case _:
@@ -197,7 +201,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
                     self.optimizer_net: Optional[torch.optim.Optimizer] = torch.optim.SGD(
                         params=[torch.nn.Parameter(torch.empty(0, device=self.server_device))],
                         lr=optimizer_embed_lr,
-                        momentum=.9,
+                        momentum=optimizer_embed_momentum,
                         weight_decay=optimizer_embed_weight_decay,
                     )
                 case _:
@@ -227,10 +231,10 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             self.evaluate_round(self.init_round, timeout)
         for server_round in range(1 + self.init_round, 1 + num_rounds):
             self.fit_round(server_round, timeout)
-            if self.eval_interval <= 0 or server_round % self.eval_interval:
-                continue
-            self.save_model(self.parameters, server_round)  # save model checkpoint
-            self.evaluate_round(server_round, timeout)
+            if self.save_interval > 0 and server_round % self.save_interval == 0:
+                self.save_model(self.parameters, server_round)  # save model checkpoint
+            if self.eval_interval > 0 and server_round % self.eval_interval == 0:
+                self.evaluate_round(server_round, timeout)
 
         # Bookkeeping
         end_time = timeit.default_timer()
@@ -740,17 +744,19 @@ def make_server(args: argparse.Namespace):
         client_model_target_type=args.client_model_target_type,
         client_model_target_head_layers=args.client_model_target_head_layers,
         client_optimizer_target_lr=args.client_optimizer_target_lr,
-        client_optimizer_target_momentum=args.client_optimizer_target_momentum,
         client_optimizer_target_weight_decay=args.client_optimizer_target_weight_decay,
+        client_optimizer_target_momentum=args.client_optimizer_target_momentum,
         client_target_gradient_mode=args.client_target_gradient_mode,
         client_target_num_batches=args.client_target_num_batches,
         optimizer_embed_type=args.optimizer_embed_type,
         optimizer_embed_lr=args.optimizer_embed_lr,
         optimizer_embed_weight_decay=args.optimizer_embed_weight_decay,
+        optimizer_embed_momentum=args.optimizer_embed_momentum,
         client_embed_num_batches=args.client_embed_num_batches,
         optimizer_hyper_type=args.optimizer_hyper_type,
         optimizer_hyper_lr=args.optimizer_hyper_lr,
         optimizer_hyper_weight_decay=args.optimizer_hyper_weight_decay,
+        optimizer_hyper_momentum=args.optimizer_hyper_momentum,
         # client_eval_mask_absent=args.client_eval_mask_absent,
         client_eval_embed_train_split=args.client_eval_embed_train_split,
     )

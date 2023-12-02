@@ -18,6 +18,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--init-round', type=int, default=0)
     parser.add_argument('--eval-interval', type=int, default=100, help='eval every X selected epochs')
     parser.add_argument('--eval-test', type=str2bool, default=False, help='eval on test dataset')
+    parser.add_argument('--save-interval', type=int, default=1000, help='save models every X selected epochs')
     parser.add_argument('--log-dir', type=str, default='./outputs', help='dir path for output file')
     parser.add_argument('--experiment-name', type=str, default=None, help='experiment name')
     parser.add_argument('--server-seed', type=int, default=42, help='seed value')
@@ -51,17 +52,19 @@ def parse_args() -> argparse.Namespace:
     #       Train Eval args        #
     ##################################
     parser.add_argument('--client-optimizer-target-lr', type=float, default=2e-3, help='learning rate for inner optimizer')
-    parser.add_argument('--client-optimizer-target-momentum', type=float, default=.9)
     parser.add_argument('--client-optimizer-target-weight-decay', type=float, default=5e-5, help='inner weight decay')
+    parser.add_argument('--client-optimizer-target-momentum', type=float, default=.9)
     parser.add_argument('--client-target-gradient-mode', type=str2bool, default=False, help='use gradient mode instead of inner optimization')
     parser.add_argument('--client-target-num-batches', type=int, default=50, help='number of inner steps')
     parser.add_argument('--optimizer-embed-type', type=str, default='adam', choices=['adam', 'sgd'], help='learning rate')
     parser.add_argument('--optimizer-embed-lr', type=float, default=2e-4, help='embedding learning rate')
     parser.add_argument('--optimizer-embed-weight-decay', type=float, default=1e-3, help='weight decay')
+    parser.add_argument('--optimizer-embed-momentum', type=float, default=.9, help='momentum')
     parser.add_argument('--client-embed-num-batches', type=int, default=1, help='batches used to estimate rescaling')
     parser.add_argument('--optimizer-hyper-type', type=str, default='adam', choices=['adam', 'sgd'], help='learning rate')
     parser.add_argument('--optimizer-hyper-lr', type=float, default=2e-4, help='learning rate')
     parser.add_argument('--optimizer-hyper-weight-decay', type=float, default=1e-3, help='weight decay')
+    parser.add_argument('--optimizer-hyper-momentum', type=float, default=.9, help='momentum')
     # parser.add_argument('--client-eval-mask-absent', type=str2bool, default=True, help='mask absent classes at eval')
     parser.add_argument('--client-eval-embed-train-split', type=bool, default=True, help='use train or test data to embed')
 

@@ -269,7 +269,7 @@ class FlowerClient(flwr.client.NumPyClient):
         gradient_mode = config['client_target_gradient_mode']
         model_target_type = config['client_model_target_type']
         criterion = torch.nn.CrossEntropyLoss(reduction='mean' if not gradient_mode else 'none')
-        classes_present = self.stage_memory['label_count'].bool().log()
+        classes_present = self.stage_memory['label_count'].bool().log() if 'label_count' in self.stage_memory else 0.
         metrics = {}
 
         match model_target_type:
@@ -283,7 +283,7 @@ class FlowerClient(flwr.client.NumPyClient):
         if not is_eval:
             self.tnet.train()
             optimizer_target_lr = config['client_optimizer_target_lr']  # if not gradient_mode else 1.
-            optimizer_target_momentum = config['client_optimizer_target_momentum']  # if not gradient_mode else 0.
+            optimizer_target_momentum = config['client_optimizer_target_momentum'] if not gradient_mode else 0.
             optimizer_target_weight_decay = config['client_optimizer_target_weight_decay']  # if not grad_mode else 0.
             optimizer = torch.optim.SGD(
                 self.tnet.parameters(),
@@ -412,10 +412,8 @@ class FlowerClient(flwr.client.NumPyClient):
         embed_grad = torch.tensor(parameters[0], device=embedding.device)
         loss = (embed_grad * embedding).sum()
         metrics = {'loss_e': loss.item()}
-        if 'loss_1' in self.stage_memory:
-            loss += self.stage_memory['loss_1']
-        if 'loss_2' in self.stage_memory:
-            loss += self.stage_memory['loss_2']
+        loss += self.stage_memory['loss_1'] if 'loss_1' in self.stage_memory else 0.
+        loss += self.stage_memory['loss_2'] if 'loss_2' in self.stage_memory else 0.
         for p in self.enet.parameters():
             p.grad = None
         loss.backward()
