@@ -32,6 +32,7 @@ class FlowerClient(flwr.client.NumPyClient):
         self.train_loaders: List[DataLoader] = []
         self.val_loaders: List[DataLoader] = []
         self.test_loaders: List[DataLoader] = []
+        self.class_presents: List[torch.Tensor] = []
         self.stage_memory: Dict = {}
 
     def get_properties(self, config: Config) -> Dict[str, Scalar]:
@@ -134,6 +135,8 @@ class FlowerClient(flwr.client.NumPyClient):
         self.train_loaders = [materialize_dataloader(dl, device) for dl in self.train_loaders]
         self.val_loaders = [materialize_dataloader(dl, device) for dl in self.val_loaders]
         self.test_loaders = [materialize_dataloader(dl, device) for dl in self.test_loaders]
+
+        self.class_presents = [dl.dataset.tensors[1].sum(dim=0).bool().log() for dl in self.train_loaders]
 
         return super().get_properties(config)
 
@@ -254,9 +257,7 @@ class FlowerClient(flwr.client.NumPyClient):
 
         embedding = embeddings.mean(dim=0)
         embedding_ndarray = embedding.detach().cpu().numpy()
-        label_count = label_all.sum(dim=0)
         self.stage_memory['embedding'] = embedding
-        self.stage_memory['label_count'] = label_count
         return [embedding_ndarray], 1, metrics
 
     def fit_2(self, parameters: List[np.ndarray], config: Config) -> Tuple[NDArrays, int, Dict[str, Scalar]]:
@@ -269,7 +270,7 @@ class FlowerClient(flwr.client.NumPyClient):
         gradient_mode = config['client_target_gradient_mode']
         model_target_type = config['client_model_target_type']
         criterion = torch.nn.CrossEntropyLoss(reduction='mean' if not gradient_mode else 'none')
-        classes_present = self.stage_memory['label_count'].bool().log() if 'label_count' in self.stage_memory else 0.
+        classes_present = self.class_presents[cid].to(device)
         metrics = {}
 
         match model_target_type:
