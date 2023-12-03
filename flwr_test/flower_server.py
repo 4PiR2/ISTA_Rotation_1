@@ -612,7 +612,6 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
                 # Handled in the respective communication stack
                 finished_fs, _ = concurrent.futures.wait(fs=submitted_fs, timeout=timeout)
 
-            weights, metrics = [], []
             for future in finished_fs:
                 """Convert finished future into either a result or a failure."""
                 # Check if there was an exception
@@ -724,6 +723,7 @@ def make_server(args: argparse.Namespace):
         init_round=args.init_round,
         eval_interval=args.eval_interval,
         eval_test=args.eval_test,
+        save_interval=args.save_interval,
         log_dir=args.log_dir,
         experiment_name=args.experiment_name,
         server_seed=args.server_seed,
