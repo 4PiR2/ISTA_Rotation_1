@@ -65,7 +65,7 @@ class FlowerServer(flwr.server.Server, flwr.server.strategy.FedAvg):
             client_dataset_alpha_train: float = .1,
             client_dataset_alpha_test: float = .1,
             client_model_num_kernels: int = 16,
-            model_embed_type: str = 'none',
+            model_embed_type: str = 'cnn',
             client_model_embed_dim: int = -1,
             client_model_embed_model_y: bool = True,
             model_hyper_hid_layers: int = 3,
