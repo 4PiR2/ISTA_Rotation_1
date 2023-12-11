@@ -1,0 +1,21 @@
+python3 train.py --mask-absent False --data-name cifar100 --gpu 6
+
+# python3 launcher.py --model-embed-type cnn --client-model-embed-y false --client-eval-mask-absent false --num-step-clients 5 --num-rounds 2000 --model-target-type head --client-target-num-batches 50 --model-embed-dim 26 --model-target-head-layers 2
+
+# python3 launcher.py --model-embed-type cnn --client-model-embed-y false --client-eval-mask-absent true --num-step-clients 5 --num-rounds 2000 --model-target-type head --client-target-num-batches 50 --model-embed-dim 26 --model-target-head-layers 2
+
+python3 launcher.py --num-step-clients 5 --num-rounds 5000 --client-dataset-data-name cifar10 --client-dataset-num-clients 100 --num-train-clients 90
+
+python3 launcher.py --num-step-clients 5 --num-rounds 5000 --client-dataset-data-name cifar10 --client-dataset-num-clients 1000 --num-train-clients 900
+
+python3 launcher.py --num-step-clients 5 --num-rounds 5000 --client-dataset-data-name cifar100 --model-embed-type mlp --client-dataset-num-clients 100 --num-train-clients 90
+
+python3 launcher.py --num-step-clients 5 --num-rounds 5000 --client-dataset-data-name cifar100 --model-embed-type mlp --client-dataset-num-clients 1000 --num-train-clients 900
+
+python3 launcher.py --num-step-clients 5 --num-rounds 5000 --client-dataset-data-name cifar10 --client-dataset-num-clients 100 --num-train-clients 90 --client-target-gradient-mode True --client-optimizer-target-weight-decay 1e-4 --optimizer-embed-weight-decay 1e-4 --optimizer-hyper-weight-decay 1e-4 --client-optimizer-target-lr 1. --optimizer-embed-lr 1e-4 --optimizer-hyper-lr 1e-4
+
+python3 launcher.py --num-step-clients 5 --num-rounds 5000 --client-dataset-data-name cifar10 --client-dataset-num-clients 1000 --num-train-clients 900 --client-target-gradient-mode True --client-optimizer-target-weight-decay 1e-4 --optimizer-embed-weight-decay 1e-4 --optimizer-hyper-weight-decay 1e-4 --client-optimizer-target-lr 1. --optimizer-embed-lr 1e-4 --optimizer-hyper-lr 1e-4
+
+python3 launcher.py --num-step-clients 5 --num-rounds 5000 --client-dataset-data-name cifar100 --model-embed-type mlp --client-dataset-num-clients 100 --num-train-clients 90 --client-target-gradient-mode True --client-optimizer-target-weight-decay 1e-4 --optimizer-embed-weight-decay 1e-4 --optimizer-hyper-weight-decay 1e-4 --client-optimizer-target-lr 1. --optimizer-embed-lr 1e-4 --optimizer-hyper-lr 1e-4
+
+python3 launcher.py --num-step-clients 5 --num-rounds 5000 --client-dataset-data-name cifar100 --model-embed-type mlp --client-dataset-num-clients 1000 --num-train-clients 900 --client-target-gradient-mode True --client-optimizer-target-weight-decay 1e-4 --optimizer-embed-weight-decay 1e-4 --optimizer-hyper-weight-decay 1e-4 --client-optimizer-target-lr 1 --optimizer-embed-lr 1e-4 --optimizer-hyper-lr 1e-4
